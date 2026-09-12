@@ -3,7 +3,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-const VERSION = "1.18.2";
+const VERSION = "1.18.3";
 const NODE_NAME = "OutpaintMaskEditor";
 const SNAP = 8;                  // frame dims snap to multiples of this
 const EDGE_SNAP_PX = 10;         // screen-px tolerance for snapping to image edges
@@ -262,9 +262,12 @@ function loadImageURL(url) {
 }
 
 // Resolve the sampler node(s) feeding a Merge node whose job comes from
-// the given editor node: editor job output -> merge job input, then the
-// merge rendered input source. Pure graph reads (no links created), so the
-// editor can adopt sampler outputs without any circular connection.
+// the given editor node: editor job output -> merge job input -> merge
+// rendered input source, chasing THROUGH bypassed nodes (bypass maps
+// output[i] <- input[i]; the saved links still point at the bypass node
+// while the executed images come from the real producer behind it).
+// Pure graph reads (no links created), so the editor can adopt sampler
+// outputs without any circular connection. Muted nodes are dead ends.
 function findLinkedSamplers(editorNode) {
   const found = [];
   try {
@@ -276,8 +279,12 @@ function findLinkedSamplers(editorNode) {
     const ends = (id) => {
       const l = links[id];
       if (!l) return null;
-      if (Array.isArray(l)) return { fromId: l[1], toId: l[3] };
-      return { fromId: l.origin_id, toId: l.target_id };
+      if (Array.isArray(l)) return { fromId: l[1], fromSlot: l[2], toId: l[3], toSlot: l[4] };
+      return { fromId: l.origin_id, fromSlot: l.origin_slot, toId: l.target_id, toSlot: l.target_slot };
+    };
+    const nodeMode = (n) => {
+      const m = n && n.mode;
+      return typeof m === "number" ? m : 0;
     };
     for (const lid of jobLinks) {
       const lk = ends(lid);
@@ -287,8 +294,24 @@ function findLinkedSamplers(editorNode) {
       const mt = merge.comfyClass || merge.type;
       if (mt !== "OutpaintMerge") continue;
       const rins = (merge.inputs || []).find((i) => i && i.name === "rendered");
-      const rl = rins && rins.link != null ? ends(rins.link) : null;
-      if (rl && !found.includes(rl.fromId)) found.push(rl.fromId);
+      if (!rins || rins.link == null) continue;
+      let hop = ends(rins.link);
+      const seen = new Set();
+      let guard = 0;
+      while (hop && guard++ < 10 && !seen.has(hop.fromId)) {
+        seen.add(hop.fromId);
+        const nd = app.graph.getNodeById(hop.fromId);
+        if (!nd) break;
+        if (nodeMode(nd) === 4) {
+          const inp = (nd.inputs || [])[hop.fromSlot];
+          if (!inp || inp.link == null) break;
+          hop = ends(inp.link);
+          continue;
+        }
+        if (nodeMode(nd) === 2) break;
+        if (!found.includes(hop.fromId)) found.push(hop.fromId);
+        break;
+      }
     }
   } catch (e) {
     /* best-effort */
@@ -2920,23 +2943,37 @@ api.addEventListener("executed", ({ detail }) => {
   }
 });
 
-// Sampler outputs adopted into the open editor gallery (cycle-free: the
-// editor reads the sampler's executed images, no links involved). The
-// sampler is resolved through the Merge node: editor job output -> merge
-// job input -> merge rendered input source. Best-effort throughout.
+// Sampler outputs adopted into the editor gallery (cycle-free: pure reads,
+// no links involved). The sampler is resolved through the Merge node:
+// editor job output -> merge job input -> merge rendered input source
+// (chasing through bypassed nodes). Every matching editor node caches the
+// run even with its editor closed, so opening the editor later still finds
+// it; the open editor adopts live. Best-effort throughout.
 try {
   api.addEventListener("executed", ({ detail }) => {
     try {
-      if (!Editor.openFlag || !Editor.node || !app.graph) return;
+      if (!app.graph) return;
       const nid = detail && detail.node;
       if (nid == null) return;
-      if (!findLinkedSamplers(Editor.node).includes(nid)) return;
       const out = detail.output || {};
       const images = out.images;
       if (!Array.isArray(images) || !images.length) return;
       const runId = (detail && detail.prompt_id) || Date.now();
-      Editor.node._opm_lastSampler = { runId, images };
-      Editor.adoptSamplerRefs(images, runId, true);
+      const nodes = app.graph._nodes || [];
+      for (const n of nodes) {
+        if (!n || (n.comfyClass !== NODE_NAME && n.type !== NODE_NAME)) continue;
+        let samplers = [];
+        try {
+          samplers = findLinkedSamplers(n);
+        } catch (e) {
+          /* ignore */
+        }
+        if (!samplers.includes(nid)) continue;
+        n._opm_lastSampler = { runId, images };
+        if (Editor.openFlag && Editor.node === n) {
+          Editor.adoptSamplerRefs(images, runId, true);
+        }
+      }
     } catch (e) {
       /* best-effort */
     }
