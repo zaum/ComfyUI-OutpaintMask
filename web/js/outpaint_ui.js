@@ -3,7 +3,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-const VERSION = "1.18.7";
+const VERSION = "1.18.8";
 const NODE_NAME = "OutpaintMaskEditor";
 const SNAP = 8;                  // frame dims snap to multiples of this
 const EDGE_SNAP_PX = 10;         // screen-px tolerance for snapping to image edges
@@ -747,6 +747,14 @@ const Editor = {
     this.renders = [];
     this.renderSel = -1;
     this.loadRenders(node);
+    // History fallback: in-memory caches die on page refresh, so a fresh
+    // page shows an empty gallery until the next run. Pull the last sampler
+    // output from the server prompt history instead (async top-up).
+    try {
+      adoptFromHistory(node);
+    } catch (e) {
+      /* ignore */
+    }
     try {
       console.info("[OutpaintMask] linked samplers for editor:", JSON.stringify(findLinkedSamplers(node)));
     } catch (e) {
@@ -3008,6 +3016,40 @@ api.addEventListener("executed", ({ detail }) => {
     /* ignore */
   }
 });
+
+// History fallback: the live caches (_opm_renders/_opm_lastSampler) die on
+// page refresh, so a fresh page would show an empty gallery until the next
+// run. On editor open, pull the last sampler output from the server prompt
+// history instead. Newest prompt first, first hit wins. Best-effort.
+async function adoptFromHistory(editorNode) {
+  try {
+    if (!editorNode) return;
+    if (Array.isArray(editorNode._opm_renders) && editorNode._opm_renders.length) return;
+    const cached = editorNode._opm_lastSampler;
+    if (cached && Array.isArray(cached.images) && cached.images.length) return;
+    const samplers = findLinkedSamplers(editorNode);
+    if (!samplers.length) return;
+    const res = await api.fetchApi("/history");
+    const hist = await res.json();
+    if (!hist || typeof hist !== "object") return;
+    const pids = Object.keys(hist).reverse();
+    for (const pid of pids) {
+      const outputs = (hist[pid] && hist[pid].outputs) || {};
+      for (const nid of Object.keys(outputs)) {
+        if (!samplers.some((sid) => matchesSampler(nid, sid))) continue;
+        const images = collectExecutedImages(outputs[nid] || {});
+        if (!images.length) continue;
+        editorNode._opm_lastSampler = { runId: pid, images };
+        if (Editor.openFlag && Editor.node === editorNode) {
+          Editor.adoptSamplerRefs(images, pid, true);
+        }
+        return;
+      }
+    }
+  } catch (e) {
+    /* history unavailable - gallery fills on the next run */
+  }
+}
 
 // Sampler outputs adopted into the editor gallery (cycle-free: pure reads,
 // no links involved). The sampler is resolved through the Merge node:
