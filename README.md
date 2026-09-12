@@ -74,7 +74,7 @@ mask=`cropped_mask`, resize_source off. Original pixels stay bit-identical.
 Connect the sampler output to the `rendered` input and add a `merged`
 output downstream: `merged` is the accepted variant pasted onto the full
 canvas (or the full canvas itself while `rendered` is unconnected). The
-**Render** button next to the editor opener queues the current workflow;
+**Render** button in the editor topbar queues the current workflow;
 the editor's right-side strip lists every render variant as a thumbnail:
 
 - click a thumbnail (or Enter) to preview it on the workspace — only the

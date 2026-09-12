@@ -3,7 +3,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-const VERSION = "1.15.0";
+const VERSION = "1.15.1";
 const NODE_NAME = "OutpaintMaskEditor";
 const SNAP = 8;                  // frame dims snap to multiples of this
 const EDGE_SNAP_PX = 10;         // screen-px tolerance for snapping to image edges
@@ -160,16 +160,11 @@ const CSS = `
   color:#ffb3c0;border:1px solid #5a2a35;padding:8px 14px;border-radius:8px;z-index:2000001;
   font:13px system-ui,Segoe UI,sans-serif}
 .opm-open-wrap{height:34px;min-height:34px;max-height:34px;overflow:hidden;display:flex;
-  align-items:stretch;gap:6px;box-sizing:border-box;flex:none;width:100%}
+  align-items:stretch;box-sizing:border-box;flex:none;width:100%}
 .opm-open-btn{background:linear-gradient(#3a76d8,#2b62b8);color:#fff;border:1px solid #4a86e8;
   border-radius:6px;cursor:pointer;font-size:13px;width:100%;height:32px;min-height:32px;
   max-height:32px;box-sizing:border-box;flex:1;line-height:30px;padding:0 12px;white-space:nowrap}
 .opm-open-btn:hover{filter:brightness(1.1)}
-.opm-render-btn{background:#2a2a2a;border:1px solid #3c3c3c;color:#ddd;border-radius:6px;
-  cursor:pointer;font-size:13px;height:32px;min-height:32px;max-height:32px;flex:0 0 auto;
-  box-sizing:border-box;line-height:30px;padding:0 14px;white-space:nowrap}
-.opm-render-btn:hover{background:#353535}
-.opm-render-btn:disabled{opacity:.45;cursor:wait}
 img.opm-tint{position:absolute;z-index:5;pointer-events:auto;cursor:pointer;border:none;outline:none;object-fit:contain;background:#0f0f0f}
 .opm-preview-box{position:relative}
 .opm-preview-paste{position:relative;z-index:20}
@@ -349,6 +344,7 @@ const Editor = {
         </div>
         <div class="opm-spacer"></div>
         <div class="opm-group">
+          <button class="opm-btn wide" id="opm-render" title="Queue the current workflow (renders the tile into the gallery)">Render</button>
           <button class="opm-btn wide" id="opm-cancel" title="Discard changes (Esc)">Cancel</button>
           <button class="opm-btn primary wide" id="opm-ok" title="Apply mask (Enter)">OK</button>
         </div>
@@ -390,6 +386,7 @@ const Editor = {
       wIn: overlay.querySelector("#opm-w"),
       hIn: overlay.querySelector("#opm-h"),
       resetBtn: overlay.querySelector("#opm-reset"),
+      renderBtn: overlay.querySelector("#opm-render"),
       cancelBtn: overlay.querySelector("#opm-cancel"),
       okBtn: overlay.querySelector("#opm-ok"),
       infoImg: overlay.querySelector("#opm-info-img"),
@@ -474,6 +471,7 @@ const Editor = {
     });
 
     ui.resetBtn.addEventListener("click", () => this.resetFrame());
+    ui.renderBtn.addEventListener("click", () => queueRender(this.node));
     ui.cancelBtn.addEventListener("click", () => this.close());
     ui.okBtn.addEventListener("click", () => this.save());
 
@@ -2405,6 +2403,8 @@ function queueRender(node) {
           console.error("[OutpaintMask] queue failed:", err);
           showToast("Render queue failed (see console).");
         });
+      } else {
+        showToast("Render queued - variants appear in the gallery.");
       }
       return;
     }
@@ -2416,10 +2416,9 @@ function queueRender(node) {
 }
 
 function makeOpenButtonEl(node) {
-  // Fixed-height wrapper so the buttons never grow vertically: the editor
-  // opener (flex) plus the Render shortcut (fixed) side by side.
+  // Fixed-height wrapper so the button never grows vertically.
   // Inject CSS here (not only on first editor open): otherwise the node
-  // buttons render unstyled until the user clicks one once.
+  // button renders unstyled until the user clicks it once.
   injectCss();
   const wrap = document.createElement("div");
   wrap.className = "opm-open-wrap";
@@ -2431,17 +2430,7 @@ function makeOpenButtonEl(node) {
     e.stopPropagation();
     openEditorSafe(node);
   });
-  const r = document.createElement("button");
-  r.className = "opm-render-btn";
-  r.textContent = "Render";
-  r.title = "Queue the current workflow (renders the tile into the gallery)";
-  r.addEventListener("click", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    queueRender(node);
-  });
   wrap.appendChild(b);
-  wrap.appendChild(r);
   node._opm_openBtn = wrap;
   return wrap;
 }
