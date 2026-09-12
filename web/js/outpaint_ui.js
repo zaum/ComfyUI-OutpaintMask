@@ -3,7 +3,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-const VERSION = "1.18.8";
+const VERSION = "1.18.10";
 const NODE_NAME = "OutpaintMaskEditor";
 const SNAP = 8;                  // frame dims snap to multiples of this
 const EDGE_SNAP_PX = 10;         // screen-px tolerance for snapping to image edges
@@ -262,44 +262,55 @@ function loadImageURL(url) {
   });
 }
 
-// Collect every executed image ref, whatever the output is named
-// (samplers use IMAGE, previews use images, ...).
-function collectExecutedImages(out) {
-  const found = [];
+// Variant PNG refs published by the merge (ui render_files), from either an
+// executed event payload or a prompt history entry (the ui dict may arrive
+// merged flat or nested under "ui").
+function renderFileRefs(out) {
   try {
-    if (!out || typeof out !== "object") return found;
-    for (const v of Object.values(out)) {
-      if (
-        Array.isArray(v) && v.length &&
-        v.every((r) => r && typeof r.filename === "string")
-      ) {
-        found.push(...v);
-      }
-    }
+    if (!out || typeof out !== "object") return [];
+    const v = out.render_files || (out.ui && out.ui.render_files) || [];
+    if (!Array.isArray(v)) return [];
+    return v.filter((r) => r && typeof r.filename === "string");
   } catch (e) {
-    /* best-effort */
+    return [];
   }
-  return found;
 }
 
-// Sampler id match, tolerant of subgraph instances: an inner node of a
-// subgraph sampler reports with a composite id (parent:inner).
-function matchesSampler(executedId, samplerId) {
-  const a = String(executedId);
-  const b = String(samplerId);
-  return a === b || a.startsWith(b + ":");
-}
-// Resolve the sampler node(s) feeding a Merge node whose job comes from
-// the given editor node: editor job output -> merge job input -> merge
-// rendered input source, chasing THROUGH bypassed nodes (bypass maps
-// output[i] <- input[i]; the saved links still point at the bypass node
-// while the executed images come from the real producer behind it).
-// Pure graph reads (no links created), so the editor can adopt sampler
-// outputs without any circular connection. Muted nodes are dead ends.
-function findLinkedSamplers(editorNode) {
-  const found = [];
+// Final composite PNG ref published by the merge (ui merged_ref or images).
+function extractMergedRef(out) {
   try {
-    if (!editorNode || !app.graph) return found;
+    if (!out || typeof out !== "object") return null;
+    const v = out.merged_ref || (out.ui && out.ui.merged_ref) || out.images || (out.ui && out.ui.images) || [];
+    const list = Array.isArray(v) ? v : [v];
+    return list.find((r) => r && typeof r.filename === "string") || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Node id match tolerant of subgraphs or string/number representations.
+function matchesNodeId(executedId, targetId) {
+  if (executedId == null || targetId == null) return false;
+  if (executedId === targetId) return true;
+  const a = String(executedId);
+  const b = String(targetId);
+  if (a === b) return true;
+  if (a.endsWith(":" + b) || b.endsWith(":" + a)) return true;
+  const na = Number(a);
+  const nb = Number(b);
+  if (Number.isFinite(na) && Number.isFinite(nb) && na === nb) return true;
+  return false;
+}
+// Resolve the Merge node fed by the given editor node: editor job output
+// -> merge job input. The merge publishes every rendered batch tile as PNG
+// refs (ui render_files): that is the gallery source. Plain IMAGE outputs
+// (sampler, VAE decode) never reach frontend events or prompt history, so
+// only the merge files are a durable source. Pure graph reads (no links
+// created), so the editor can adopt merge variants without any circular
+// connection.
+function findLinkedMerge(editorNode) {
+  try {
+    if (!editorNode || !app.graph) return null;
     const outs = editorNode.outputs || [];
     const jobOut = outs.find((o) => o && o.name === "job");
     const jobLinks = (jobOut && jobOut.links) || [];
@@ -322,10 +333,6 @@ function findLinkedSamplers(editorNode) {
       if (Array.isArray(l)) return { fromId: l[1], fromSlot: l[2], toId: l[3], toSlot: l[4] };
       return { fromId: l.origin_id, fromSlot: l.origin_slot, toId: l.target_id, toSlot: l.target_slot };
     };
-    const nodeMode = (n) => {
-      const m = n && n.mode;
-      return typeof m === "number" ? m : 0;
-    };
     for (const lid of jobLinks) {
       const lk = ends(lid);
       if (!lk) continue;
@@ -333,30 +340,12 @@ function findLinkedSamplers(editorNode) {
       if (!merge) continue;
       const mt = merge.comfyClass || merge.type;
       if (mt !== "OutpaintMerge") continue;
-      const rins = (merge.inputs || []).find((i) => i && i.name === "rendered");
-      if (!rins || rins.link == null) continue;
-      let hop = ends(rins.link);
-      const seen = new Set();
-      let guard = 0;
-      while (hop && guard++ < 10 && !seen.has(hop.fromId)) {
-        seen.add(hop.fromId);
-        const nd = app.graph.getNodeById(hop.fromId);
-        if (!nd) break;
-        if (nodeMode(nd) === 4) {
-          const inp = (nd.inputs || [])[hop.fromSlot];
-          if (!inp || inp.link == null) break;
-          hop = ends(inp.link);
-          continue;
-        }
-        if (nodeMode(nd) === 2) break;
-        if (!found.includes(hop.fromId)) found.push(hop.fromId);
-        break;
-      }
+      return lk.toId;
     }
   } catch (e) {
     /* best-effort */
   }
-  return found;
+  return null;
 }
 
 function showToast(msg) {
@@ -399,11 +388,11 @@ const Editor = {
   offY: 0,
   drag: null,
   hover: null,
-  // Render variant gallery session: kept sampler outputs ({batchIdx, url,
+  // Render variant gallery session: kept merge variant refs ({batchIdx, url,
   // img}) + selected index (-1 = none). Rebuilt on every editor open.
   renders: [],
   renderSel: -1,
-  // Merge-run tag of the session batch: a new sampler run replaces the
+  // Merge-run tag of the session batch: a new merge run replaces the
   // session (indices always match the backend batch), a repeated event for
   // the same run only tops it up.
   renderRunId: null,
@@ -470,7 +459,7 @@ const Editor = {
       <div class="opm-mid">
         <div class="opm-viewport" id="opm-viewport"><canvas id="opm-canvas"></canvas></div>
         <div class="opm-side" id="opm-side">
-          <div class="opm-side-title"><span>Renders</span><button class="opm-side-load" id="opm-render-load" title="Load the last sampler output into the gallery">↻</button></div>
+          <div class="opm-side-title"><span>Renders</span><button class="opm-side-load" id="opm-render-load" title="Load the last merge variants into the gallery">↻</button></div>
           <div class="opm-render-list" id="opm-render-list"></div>
           <div class="opm-side-diag" id="opm-side-diag"></div>
         </div>
@@ -743,20 +732,20 @@ const Editor = {
       this.resetFrame();
     }
 
-    // Render variant gallery session (sampler output batch, if any).
+    // Render variant gallery session (merge variant batch, if any).
     this.renders = [];
     this.renderSel = -1;
     this.loadRenders(node);
     // History fallback: in-memory caches die on page refresh, so a fresh
-    // page shows an empty gallery until the next run. Pull the last sampler
-    // output from the server prompt history instead (async top-up).
+    // page shows an empty gallery until the next run. Pull the last merge
+    // variant batch from the server prompt history instead (async top-up).
     try {
       adoptFromHistory(node);
     } catch (e) {
       /* ignore */
     }
     try {
-      console.info("[OutpaintMask] linked samplers for editor:", JSON.stringify(findLinkedSamplers(node)));
+      console.info("[OutpaintMask] linked merge for editor:", JSON.stringify(findLinkedMerge(node)));
     } catch (e) {
       /* ignore */
     }
@@ -993,25 +982,24 @@ const Editor = {
     // re-pasted over its own rect, so ONLY the outpaint part of the variant
     // shows (original pixels stay intact).
     const fin = this.showFinal && this.renderFinal ? this.renderFinal.img : null;
-    if (fin && fin.naturalWidth > 0) {
+    if (fin && fin.naturalWidth > 0 && !this.drag) {
       const tx = Math.max(0, f.x);
       const ty = Math.max(0, f.y);
       ctx.drawImage(fin, X(f.x - tx), Y(f.y - ty), fin.naturalWidth * s, fin.naturalHeight * s);
-    } else {
+    } else if (!this.drag) {
       const vsel = this.renderSel;
       const vr = vsel >= 0 && vsel < this.renders.length ? this.renders[vsel] : null;
       if (vr && vr.img && vr.img.naturalWidth > 0) {
         ctx.drawImage(vr.img, X(f.x), Y(f.y), f.w * s, f.h * s);
-        const lx = -f.x;
-        const ly = -f.y;
-        const x0 = Math.max(0, -lx);
-        const y0 = Math.max(0, -ly);
-        const x1 = Math.min(this.W, f.w - lx);
-        const y1 = Math.min(this.H, f.h - ly);
-        if (x1 > x0 && y1 > y0) {
+        const ix0 = Math.max(0, f.x);
+        const iy0 = Math.max(0, f.y);
+        const ix1 = Math.min(this.W, f.x + f.w);
+        const iy1 = Math.min(this.H, f.y + f.h);
+        if (ix1 > ix0 && iy1 > iy0) {
           ctx.drawImage(
-            this.img, x0, y0, x1 - x0, y1 - y0,
-            X(lx + x0), Y(ly + y0), (x1 - x0) * s, (y1 - y0) * s
+            this.img,
+            ix0, iy0, ix1 - ix0, iy1 - iy0,
+            X(ix0), Y(iy0), (ix1 - ix0) * s, (iy1 - iy0) * s
           );
         }
       }
@@ -1282,6 +1270,13 @@ const Editor = {
     // doing nothing, so the content can always be pulled back into view.
     // Middle mouse always pans, wherever the press happens.
     const wantPan = btn === 1;
+    if (!wantPan && (hit || inside)) {
+      if (this.renderSel !== -1 || this.showFinal) {
+        this.renderSel = -1;
+        this.showFinal = false;
+        this.renderGallery();
+      }
+    }
     // Cap-flash edge tracking: fires only when a manual resize grows into
     // the limit (presets/sliders/typing never flash).
     this._prevArea = f.w * f.h;
@@ -1364,9 +1359,9 @@ const Editor = {
     const wasPan = this.drag.mode === "pan";
     this.drag = null;
     if (wasPan) return;
-    // Hard MP cap: corner/edge drags can never exceed the limit, so there
-    // is nothing to spring back — just commit the frame.
-    this.commit();
+    // Sync toolbar readouts without resetting camera position/zoom so the
+    // loaded image stays completely stationary.
+    this.syncToolbar();
   },
 
   applyDrag(ix, iy, shift) {
@@ -1893,9 +1888,9 @@ const Editor = {
   // ------------------------------------------------------------ render gallery
 
   loadRenders(node) {
-    // Session copy of the sampler output batch: the editor node's own
-    // executed refs first, otherwise the last sampler run adopted for it
-    // (adoptSamplerRefs). Dropped batch indices stay hidden, selection
+    // Session copy of the merge variant batch: the editor node's own
+    // executed refs first, otherwise the last merge batch adopted for it
+    // (adoptRenderRefs). Dropped batch indices stay hidden, selection
     // restores the saved pick.
     let refs = (node && node._opm_renders) || [];
     let runId = "own";
@@ -1953,13 +1948,30 @@ const Editor = {
     });
   },
 
-  // Adopt sampler output images into the gallery session (cycle-free: pure
+  // Adopt merge variant files into the gallery session (cycle-free: pure
   // reads, no links). A fresh run batch replaces the session so indices
   // always match the backend batch; a repeated event for the same run only
   // tops up missing files. Returns true when the gallery changed.
-  adoptSamplerRefs(images, runId, notify) {
+  adoptRenderRefs(images, runId, notify, mergedRef) {
     const refs = (images || []).filter((r) => r && r.filename);
-    if (!refs.length) return false;
+    const mref = mergedRef || (this.node && this.node._opm_merged) || null;
+    if (!refs.length && !mref) return false;
+
+    // Update final composite thumbnail
+    if (mref) {
+      if (this.node) this.node._opm_merged = mref;
+      const murl = buildViewURL(mref);
+      if (murl && (!this.renderFinal || this.renderFinal.url !== murl)) {
+        const fin = { url: murl, img: null };
+        this.renderFinal = fin;
+        loadImageURL(murl)
+          .then((im) => {
+            if (this.openFlag && this.renderFinal === fin) fin.img = im;
+          })
+          .catch(() => {});
+      }
+    }
+
     if (this.renderRunId === runId && this.renders.length) {
       let added = false;
       refs.forEach((ref) => {
@@ -1969,12 +1981,12 @@ const Editor = {
         this.renders.push({ batchIdx: nextIdx, url, img: null, runId });
         added = true;
       });
-      if (added) {
+      if (added || mref) {
         this._loadVariantImages();
         this.renderGallery();
-        if (notify) showToast("Gallery updated with the latest renders.");
+        if (notify && added) showToast("Gallery updated with the latest renders.");
       }
-      return added;
+      return added || Boolean(mref);
     }
     this.renders = [];
     this.renderRunId = runId;
@@ -1982,26 +1994,31 @@ const Editor = {
       const url = buildViewURL(ref);
       if (url) this.renders.push({ batchIdx: i, url, img: null, runId });
     });
-    if (!this.renders.length) return false;
-    this.renderFinal = null;
-    this.showFinal = false;
     const st = this.getState(this.node);
-    this.renderSel = Math.max(0, Math.min(st.render_pick || 0, this.renders.length - 1));
-    if (this.node) this.node._opm_render_n = refs.length;
+    this.renderSel = this.renders.length
+      ? Math.max(0, Math.min(st.render_pick || 0, this.renders.length - 1))
+      : -1;
+    if (this.node && refs.length) this.node._opm_render_n = refs.length;
     this._loadVariantImages();
     this.renderGallery();
-    if (notify) showToast(`${this.renders.length} render variant(s) loaded into the gallery.`);
+    if (notify) {
+      if (this.renders.length) {
+        showToast(`${this.renders.length} render variant(s) loaded into the gallery.`);
+      } else if (mref) {
+        showToast("Final render loaded into the gallery.");
+      }
+    }
     return true;
   },
 
-  // Manual pull of the last seen sampler output (gallery header button).
+  // Manual pull of the last seen merge variants (gallery header button).
   manualAdoptRenders() {
     const node = this.node;
     const cached = node && node._opm_lastSampler;
-    if (cached && Array.isArray(cached.images) && cached.images.length) {
-      if (this.adoptSamplerRefs(cached.images, cached.runId, true)) return;
+    if (cached && ((Array.isArray(cached.images) && cached.images.length) || cached.merged)) {
+      if (this.adoptRenderRefs(cached.images || [], cached.runId, true, cached.merged)) return;
     }
-    showToast("Queue first - no sampler output seen yet.");
+    showToast("Queue first - no merge variants saved yet.");
   },
 
   renderGallery() {
@@ -2067,46 +2084,20 @@ const Editor = {
       });
       list.appendChild(t);
     });
-    // Final composite thumb (backend merge result): previews the finished
-    // full canvas on the workspace. No accept/delete: it follows the runs.
-    if (this.renderFinal) {
-      const t = document.createElement("div");
-      t.className = "opm-thumb" + (this.showFinal ? " active" : "");
-      t.tabIndex = 0;
-      const im = document.createElement("img");
-      im.src = this.renderFinal.url;
-      im.alt = "Final composite";
-      const tag = document.createElement("span");
-      tag.className = "opm-thumb-tag final";
-      tag.textContent = "Final";
-      t.appendChild(im);
-      t.appendChild(tag);
-      const show = () => {
-        this.showFinal = true;
-        this.renderGallery();
-      };
-      t.addEventListener("click", show);
-      t.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") show();
-      });
-      list.appendChild(t);
-    }
     this.updateDiag();
   },
 
-  // One-line diagnostic: which sampler node the gallery listens to.
+  // One-line diagnostic: which merge node the gallery loads variants from.
   updateDiag() {
     const ui = this.ui;
     if (!ui || !ui.sideDiag) return;
-    let samps = [];
+    let mid = null;
     try {
-      samps = findLinkedSamplers(this.node);
+      mid = findLinkedMerge(this.node);
     } catch (e) {
       /* ignore */
     }
-    ui.sideDiag.textContent = samps.length
-      ? `sampler:${samps.join(",")}`
-      : "sampler:-";
+    ui.sideDiag.textContent = mid != null ? `merge:${mid}` : "merge:-";
   },
 
   acceptVariant(i) {
@@ -2966,7 +2957,7 @@ api.addEventListener("executed", ({ detail }) => {
     if (!node || (node.comfyClass !== NODE_NAME && node.type !== NODE_NAME)) return;
     const out = detail.output || {};
     if (Array.isArray(out.source) && out.source[0]) node._opm_source = out.source[0];
-    // Sampler output batch for the editor render gallery (+ batch size, so
+    // Merge variant batch for the editor render gallery (+ batch size, so
     // the gallery can compute the drop list). A run while the editor is open
     // refreshes the gallery live.
     if (Array.isArray(out.renders)) node._opm_renders = out.renders;
@@ -3019,44 +3010,52 @@ api.addEventListener("executed", ({ detail }) => {
 
 // History fallback: the live caches (_opm_renders/_opm_lastSampler) die on
 // page refresh, so a fresh page would show an empty gallery until the next
-// run. On editor open, pull the last sampler output from the server prompt
-// history instead. Newest prompt first, first hit wins. Best-effort.
+// run. On editor open, pull the last merge variant batch from the server
+// prompt history instead. Newest prompt first, first hit wins. Best-effort.
 async function adoptFromHistory(editorNode) {
   try {
     if (!editorNode) return;
     if (Array.isArray(editorNode._opm_renders) && editorNode._opm_renders.length) return;
     const cached = editorNode._opm_lastSampler;
     if (cached && Array.isArray(cached.images) && cached.images.length) return;
-    const samplers = findLinkedSamplers(editorNode);
-    if (!samplers.length) return;
+    const mid = findLinkedMerge(editorNode);
+    if (mid == null) return;
     const res = await api.fetchApi("/history");
     const hist = await res.json();
     if (!hist || typeof hist !== "object") return;
     const pids = Object.keys(hist).reverse();
     for (const pid of pids) {
       const outputs = (hist[pid] && hist[pid].outputs) || {};
-      for (const nid of Object.keys(outputs)) {
-        if (!samplers.some((sid) => matchesSampler(nid, sid))) continue;
-        const images = collectExecutedImages(outputs[nid] || {});
-        if (!images.length) continue;
-        editorNode._opm_lastSampler = { runId: pid, images };
-        if (Editor.openFlag && Editor.node === editorNode) {
-          Editor.adoptSamplerRefs(images, pid, true);
+      let entry = outputs[mid] ?? outputs[String(mid)] ?? null;
+      if (!entry) {
+        for (const [k, v] of Object.entries(outputs)) {
+          if (matchesNodeId(k, mid)) {
+            entry = v;
+            break;
+          }
         }
-        return;
       }
+      if (!entry) continue;
+      const images = renderFileRefs(entry);
+      const mref = extractMergedRef(entry);
+      if (!images.length && !mref) continue;
+      if (mref) editorNode._opm_merged = mref;
+      editorNode._opm_lastSampler = { runId: pid, images, merged: mref };
+      if (Editor.openFlag && Editor.node === editorNode) {
+        Editor.adoptRenderRefs(images, pid, true, mref);
+      }
+      return;
     }
   } catch (e) {
     /* history unavailable - gallery fills on the next run */
   }
 }
 
-// Sampler outputs adopted into the editor gallery (cycle-free: pure reads,
-// no links involved). The sampler is resolved through the Merge node:
-// editor job output -> merge job input -> merge rendered input source
-// (chasing through bypassed nodes). Every matching editor node caches the
-// run even with its editor closed, so opening the editor later still finds
-// it; the open editor adopts live. Best-effort throughout.
+// Merge variant batches adopted into the editor gallery (cycle-free: pure
+// reads, no links involved). The merge is resolved through the job link
+// (editor job output -> merge job input). Every matching editor node caches
+// the batch even with its editor closed, so opening the editor later still
+// finds it; the open editor adopts live. Best-effort throughout.
 try {
   api.addEventListener("executed", ({ detail }) => {
     try {
@@ -3064,23 +3063,25 @@ try {
       const nid = detail && detail.node;
       if (nid == null) return;
       const out = detail.output || {};
-      const images = collectExecutedImages(out);
-      if (!images.length) return;
+      const images = renderFileRefs(out);
+      const mref = extractMergedRef(out);
+      if (!images.length && !mref) return;
       const runId = (detail && detail.prompt_id) || Date.now();
       const nodes = app.graph._nodes || [];
       for (const n of nodes) {
         if (!n || (n.comfyClass !== NODE_NAME && n.type !== NODE_NAME)) continue;
-        let samplers = [];
+        let mid = null;
         try {
-          samplers = findLinkedSamplers(n);
+          mid = findLinkedMerge(n);
         } catch (e) {
           /* ignore */
         }
-        if (!samplers.some((sid) => matchesSampler(nid, sid))) continue;
-        n._opm_lastSampler = { runId, images };
-        console.info(`[OutpaintMask] adopted ${images.length} image(s) from node ${nid} for editor ${n.id}`);
+        if (mid == null || !matchesNodeId(nid, mid)) continue;
+        if (mref) n._opm_merged = mref;
+        n._opm_lastSampler = { runId, images, merged: mref };
+        console.info(`[OutpaintMask] adopted ${images.length} variant(s) from merge ${nid} for editor ${n.id}`);
         if (Editor.openFlag && Editor.node === n) {
-          Editor.adoptSamplerRefs(images, runId, true);
+          Editor.adoptRenderRefs(images, runId, true, mref);
         }
       }
     } catch (e) {

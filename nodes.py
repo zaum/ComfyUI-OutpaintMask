@@ -670,6 +670,7 @@ class OutpaintMerge:
             },
         }
 
+    OUTPUT_NODE = True
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("merged",)
     FUNCTION = "merge"
@@ -679,8 +680,84 @@ class OutpaintMerge:
         "full canvas at (tile_x, tile_y), blended with tile_mask. Wire: "
         "base_image=original_image, rendered=sampler output, "
         "tile_mask=cropped_mask, tile_x=crop_x, tile_y=crop_y, "
-        "job=editor job output (carries the gallery pick)."
+        "job=editor job output (carries the gallery pick). Publishes "
+        "the final merged composite (ui images for node preview, merged_ref "
+        "for gallery) and every rendered batch tile as PNG refs "
+        "(ui render_files) so the editor gallery can load variants."
     )
+
+    def _save_merged(self, merged_np):
+        """Persist the merged composite as a PNG and return a /view ref.
+
+        Published as ui images (native ComfyUI canvas node preview) and
+        merged_ref (editor gallery Final thumb).
+        """
+        try:
+            buf = io.BytesIO()
+            Image.fromarray(
+                (np.clip(merged_np, 0.0, 1.0) * 255.0).astype(np.uint8), "RGB"
+            ).save(buf, format="PNG", compress_level=1)
+            data = buf.getvalue()
+            m = hashlib.sha256(data)
+            save_name = f"outpaint_merged_{m.hexdigest()[:16]}.png"
+            pdir = os.path.join(
+                folder_paths.get_input_directory(), PREVIEW_DIR_NAME
+            )
+            os.makedirs(pdir, exist_ok=True)
+            dest = os.path.join(pdir, save_name)
+            if not os.path.isfile(dest):
+                _atomic_write_png(dest, data)
+            _prune_dir(pdir, ("outpaint_merged_",))
+            return {
+                "filename": save_name,
+                "subfolder": PREVIEW_DIR_NAME,
+                "type": "input",
+            }
+        except Exception as e:
+            print(f"[OutpaintMask] merged save failed: {e}")
+            return None
+
+    def _save_variants(self, rendered, n, mw, mh):
+        """Persist every rendered batch tile as a PNG and return /view refs.
+
+        Plain IMAGE outputs (sampler, VAE decode) never reach the frontend
+        events or the prompt history, so without this the gallery could not
+        load the variants after a run or a page refresh. Content-hash names
+        deduplicate re-queues; the folder is pruned best-effort.
+        """
+        refs = []
+        try:
+            pdir = os.path.join(
+                folder_paths.get_input_directory(), PREVIEW_DIR_NAME
+            )
+            os.makedirs(pdir, exist_ok=True)
+            for i in range(n):
+                pim = _tensor_to_pil(rendered, index=i)
+                if pim is None:
+                    continue
+                if pim.size != (mw, mh):
+                    pim = pim.resize((mw, mh), Image.BILINEAR)
+                buf = io.BytesIO()
+                pim.save(buf, format="PNG", compress_level=1)
+                data = buf.getvalue()
+                save_name = (
+                    "outpaint_variant_"
+                    f"{hashlib.sha256(data).hexdigest()[:16]}.png"
+                )
+                dest = os.path.join(pdir, save_name)
+                if not os.path.isfile(dest):
+                    _atomic_write_png(dest, data)
+                refs.append(
+                    {
+                        "filename": save_name,
+                        "subfolder": PREVIEW_DIR_NAME,
+                        "type": "input",
+                    }
+                )
+            _prune_dir(pdir, ("outpaint_variant_",))
+        except Exception as e:
+            print(f"[OutpaintMask] variant save failed: {e}")
+        return refs
 
     def merge(self, base_image, rendered, tile_mask, tile_x, tile_y, job="{}"):
         try:
@@ -721,6 +798,7 @@ class OutpaintMerge:
                 )
                 rpim = rpim.resize((mw, mh), Image.BILINEAR)
             gen = np.asarray(rpim, dtype=np.float32) / 255.0
+            variant_refs = self._save_variants(rendered, n, mw, mh)
             out = barr.copy()
             x, y = int(tile_x), int(tile_y)
             dx0, dy0 = max(0, x), max(0, y)
@@ -732,20 +810,37 @@ class OutpaintMerge:
                 t = gen[sy0 : sy0 + h_, sx0 : sx0 + w_, :]
                 reg = out[dy0:dy1, dx0:dx1, :]
                 out[dy0:dy1, dx0:dx1, :] = m * t + (1.0 - m) * reg
+            merged_ref = self._save_merged(out)
+            ui_images = variant_refs[:1] if variant_refs else ([merged_ref] if merged_ref else [])
             print(
                 f"[OutpaintMask] merged variant {choice} at+{x}+{y} "
-                f"tile {mw}x{mh} base {bw}x{bh}"
+                f"tile {mw}x{mh} base {bw}x{bh} variants={len(variant_refs)} "
+                f"merged={'yes' if merged_ref else 'no'}"
             )
-            return (torch.from_numpy(out.astype(np.float32))[None,],)
+            # NOTE: every ui value MUST be a list (core merges ui dicts).
+            return {
+                "ui": {
+                    "images": ui_images,
+                    "render_files": variant_refs,
+                    "merged_ref": [merged_ref] if merged_ref else [],
+                },
+                "result": (torch.from_numpy(out.astype(np.float32))[None,],),
+            }
         except Exception as e:
             print(f"[OutpaintMask] merge() failed: {e}")
             traceback.print_exc()
             try:
                 if isinstance(base_image, torch.Tensor) and base_image.ndim == 4:
-                    return (base_image[0:1].detach().cpu().float(),)
+                    return {
+                        "ui": {"images": [], "render_files": [], "merged_ref": []},
+                        "result": (base_image[0:1].detach().cpu().float(),),
+                    }
             except Exception:
                 pass
-            return (torch.zeros((1, 64, 64, 3), dtype=torch.float32),)
+            return {
+                "ui": {"images": [], "render_files": [], "merged_ref": []},
+                "result": (torch.zeros((1, 64, 64, 3), dtype=torch.float32),),
+            }
 
     @classmethod
     def IS_CHANGED(s, base_image, rendered, tile_mask, tile_x, tile_y, job="{}"):
