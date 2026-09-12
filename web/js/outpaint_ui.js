@@ -3,7 +3,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-const VERSION = "1.18.4";
+const VERSION = "1.18.5";
 const NODE_NAME = "OutpaintMaskEditor";
 const SNAP = 8;                  // frame dims snap to multiples of this
 const EDGE_SNAP_PX = 10;         // screen-px tolerance for snapping to image edges
@@ -303,8 +303,20 @@ function findLinkedSamplers(editorNode) {
     const jobOut = outs.find((o) => o && o.name === "job");
     const jobLinks = (jobOut && jobOut.links) || [];
     const links = app.graph.links || {};
+    // NOTE: graph.links is a Map (not a plain object) in current
+    // frontends, and link ids may be numbers or strings - resolve both.
+    const rawLink = (id) => {
+      try {
+        if (links && typeof links.get === "function") {
+          return links.get(id) ?? links.get(Number(id)) ?? links.get(String(id)) ?? null;
+        }
+        return (links && links[id]) ?? null;
+      } catch (e) {
+        return null;
+      }
+    };
     const ends = (id) => {
-      const l = links[id];
+      const l = rawLink(id);
       if (!l) return null;
       if (Array.isArray(l)) return { fromId: l[1], fromSlot: l[2], toId: l[3], toSlot: l[4] };
       return { fromId: l.origin_id, fromSlot: l.origin_slot, toId: l.target_id, toSlot: l.target_slot };
