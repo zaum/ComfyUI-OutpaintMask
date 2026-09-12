@@ -3,7 +3,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-const VERSION = "1.15.1";
+const VERSION = "1.16.0";
 const NODE_NAME = "OutpaintMaskEditor";
 const SNAP = 8;                  // frame dims snap to multiples of this
 const EDGE_SNAP_PX = 10;         // screen-px tolerance for snapping to image edges
@@ -85,6 +85,12 @@ const CSS = `
 .opm-btn:hover{background:#353535}
 .opm-btn.primary{background:#2f6fed;border-color:#2f6fed;color:#fff}
 .opm-btn.primary:hover{background:#3f7cf0}
+.opm-progress{height:3px;flex:none;background:#101010}
+.opm-progress-fill{height:100%;width:0;background:linear-gradient(90deg,#2f6fed,#6ea8fe);
+  transition:width .15s ease-out}
+.opm-progress-fill.busy{width:100% !important;background:repeating-linear-gradient(90deg,
+  #2f6fed 0 8px,#2456c4 8px 16px);animation:opm-slide 1s linear infinite;transition:none}
+@keyframes opm-slide{to{background-position:16px 0}}
 .opm-pill{background:#242424;border:1px solid #3c3c3c;color:#ccc;padding:5px 10px;border-radius:0;
   cursor:pointer;font-size:12.5px;margin-left:-1px;position:relative;white-space:nowrap}
 .opm-pill:first-child{border-radius:4px 0 0 4px;margin-left:0}
@@ -344,11 +350,12 @@ const Editor = {
         </div>
         <div class="opm-spacer"></div>
         <div class="opm-group">
-          <button class="opm-btn wide" id="opm-render" title="Queue the current workflow (renders the tile into the gallery)">Render</button>
           <button class="opm-btn wide" id="opm-cancel" title="Discard changes (Esc)">Cancel</button>
           <button class="opm-btn primary wide" id="opm-ok" title="Apply mask (Enter)">OK</button>
+          <button class="opm-btn primary wide" id="opm-render" title="Queue the current workflow (renders the tile into the gallery)">Render</button>
         </div>
       </div>
+      <div class="opm-progress opm-hidden" id="opm-progress"><div class="opm-progress-fill" id="opm-progress-fill"></div></div>
       <div class="opm-mid">
         <div class="opm-viewport" id="opm-viewport"><canvas id="opm-canvas"></canvas></div>
         <div class="opm-side" id="opm-side">
@@ -392,8 +399,39 @@ const Editor = {
       infoImg: overlay.querySelector("#opm-info-img"),
       infoFrame: overlay.querySelector("#opm-info-frame"),
       renderList: overlay.querySelector("#opm-render-list"),
+      progressWrap: overlay.querySelector("#opm-progress"),
+      progressFill: overlay.querySelector("#opm-progress-fill"),
     };
     this.wireEvents();
+  },
+
+  showProgressBusy() {
+    // Thin indeterminate strip: a queue is running, no step numbers yet.
+    const ui = this.ui;
+    if (!ui || !ui.progressWrap || !ui.progressFill) return;
+    ui.progressWrap.classList.remove("opm-hidden");
+    ui.progressFill.classList.add("busy");
+  },
+
+  setProgress(value, max) {
+    const ui = this.ui;
+    if (!ui || !ui.progressWrap || !ui.progressFill) return;
+    ui.progressWrap.classList.remove("opm-hidden");
+    ui.progressFill.classList.remove("busy");
+    const v = Number(value);
+    const m = Number(max);
+    const pct = Number.isFinite(v) && Number.isFinite(m) && m > 0
+      ? Math.max(0, Math.min(100, (v / m) * 100))
+      : 0;
+    ui.progressFill.style.width = `${pct}%`;
+  },
+
+  hideProgress() {
+    const ui = this.ui;
+    if (!ui || !ui.progressWrap || !ui.progressFill) return;
+    ui.progressWrap.classList.add("opm-hidden");
+    ui.progressFill.classList.remove("busy");
+    ui.progressFill.style.width = "0";
   },
 
   wireEvents() {
@@ -622,6 +660,7 @@ const Editor = {
     this.capFlashUntil = 0;
     this.renders = [];
     this.renderSel = -1;
+    this.hideProgress();
     if (this.ui) this.ui.overlay.classList.add("opm-hidden");
     if (this._raf) cancelAnimationFrame(this._raf);
     this._raf = null;
@@ -2398,6 +2437,11 @@ function queueRender(node) {
     }
     if (app && typeof app.queuePrompt === "function") {
       const r = app.queuePrompt(0);
+      try {
+        if (Editor.openFlag) Editor.showProgressBusy();
+      } catch (e) {
+        /* strip is best-effort */
+      }
       if (r && typeof r.catch === "function") {
         r.catch((err) => {
           console.error("[OutpaintMask] queue failed:", err);
@@ -2677,9 +2721,47 @@ api.addEventListener("executed", ({ detail }) => {
       const w = (node.widgets || []).find((x) => x.name === "outpaint_state");
       if (w) w.value = stateRaw;
     }
+    // Our own run finished: the gallery just refreshed above, drop the strip.
+    try {
+      if (Editor.openFlag && Editor.node === node) Editor.hideProgress();
+    } catch (e) {
+      /* ignore */
+    }
   } catch (e) {
     /* ignore */
   }
 });
+
+// Queue progress strip: while the editor is open, sampler step events fill
+// the thin bar under the topbar; an idle queue (or editor close) hides it.
+// All best-effort: event shapes vary across frontend versions.
+try {
+  api.addEventListener("progress", ({ detail }) => {
+    try {
+      if (!Editor.openFlag) return;
+      const v = detail && detail.value;
+      const m = detail && detail.max;
+      if (typeof v === "number" && typeof m === "number" && m > 0) {
+        Editor.setProgress(v, m);
+      } else {
+        Editor.showProgressBusy();
+      }
+    } catch (e) {
+      /* ignore */
+    }
+  });
+  api.addEventListener("executing", ({ detail }) => {
+    try {
+      if (!Editor.openFlag) return;
+      const idle = !detail || (!detail.node && !detail.prompt_id);
+      if (idle) Editor.hideProgress();
+      else Editor.showProgressBusy();
+    } catch (e) {
+      /* ignore */
+    }
+  });
+} catch (e) {
+  /* progress strip stays hidden on old frontends */
+}
 
 console.log(`[OutpaintMask] frontend extension v${VERSION} loaded`);

@@ -72,6 +72,20 @@ def _parse_state(raw):
     return st
 
 
+def _pick_batch_index(n, state):
+    """Accepted render variant: state pick into the batch minus drops."""
+    try:
+        drop = set(state.get("render_drop", []) or [])
+    except Exception:
+        drop = set()
+    avail = [i for i in range(max(0, int(n))) if i not in drop] or [0]
+    try:
+        pick = int(state.get("render_pick", 0) or 0)
+    except Exception:
+        pick = 0
+    return avail[max(0, min(pick, len(avail) - 1))]
+
+
 def _tensor_fp(t):
     """Sampled content fingerprint for an IMAGE tensor (or None).
 
@@ -218,9 +232,11 @@ class OutpaintMaskEditor:
     # FULL canvas (whole source + positive outpaint expansion, nothing
     # cropped away) with the source on mid-gray. crop_x/crop_y is the tile
     # top-left on the full canvas; merged is the accepted render variant
-    # pasted back (original pixels stay bit-identical, or the full canvas
-    # itself while rendered is unconnected).
-    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", "INT", "INT", "IMAGE")
+    # pasted back (same-node feedback only - for a real workflow feed the
+    # crop outputs through a sampler into a separate OutpaintMerge node,
+    # otherwise the graph is circular). job carries the normalized state
+    # (pads, pick/drop) for the merge node.
+    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", "INT", "INT", "IMAGE", "STRING")
     RETURN_NAMES = (
         "cropped_image",
         "cropped_mask",
@@ -228,6 +244,7 @@ class OutpaintMaskEditor:
         "crop_x",
         "crop_y",
         "merged",
+        "job",
     )
     OUTPUT_NODE = True
     FUNCTION = "load"
@@ -358,6 +375,7 @@ class OutpaintMaskEditor:
                     tx,
                     ty,
                     torch.from_numpy(merged_np)[None,],
+                    json.dumps(state),
                 ),
             }
         except Exception as e:
@@ -488,10 +506,7 @@ class OutpaintMaskEditor:
             n = int(rendered.shape[0]) if rendered.ndim == 4 else 1
             if n < 1:
                 return full_np
-            drop = set(state.get("render_drop", []) or [])
-            avail = [i for i in range(n) if i not in drop] or [0]
-            pick = int(state.get("render_pick", 0) or 0)
-            choice = avail[max(0, min(pick, len(avail) - 1))]
+            choice = _pick_batch_index(n, state)
             pim = _tensor_to_pil(rendered, index=choice)
             if pim is None:
                 return full_np
@@ -541,7 +556,7 @@ class OutpaintMaskEditor:
         # Result arity must always match RETURN_TYPES.
         return {
             "ui": {"images": ui_images},
-            "result": (out_image, out_mask, out_image, 0, 0, out_image),
+            "result": (out_image, out_mask, out_image, 0, 0, out_image, "{}"),
         }
 
     @classmethod
@@ -578,10 +593,128 @@ class OutpaintMaskEditor:
             return str(time.time_ns())
 
 
+class OutpaintMerge:
+    """Paste a rendered tile back onto the full canvas (linear flow).
+
+    The editor node cannot feed its own outputs back into its own inputs
+    (that is a circular connection, rejected by ComfyUI), so the merge lives
+    here: base canvas + rendered tile batch + tile mask + tile position +
+    job state -> merged full canvas. Original pixels stay bit-identical.
+    """
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "base_image": ("IMAGE",),
+                "rendered": ("IMAGE",),
+                "tile_mask": ("MASK",),
+                "tile_x": ("INT", {"default": 0, "min": 0, "max": 16384, "step": 1}),
+                "tile_y": ("INT", {"default": 0, "min": 0, "max": 16384, "step": 1}),
+                "job": ("STRING", {"default": "{}"}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("merged",)
+    FUNCTION = "merge"
+    CATEGORY = "image/inpaint"
+    DESCRIPTION = (
+        "Outpaint merge. Pastes the accepted sampler tile back onto the "
+        "full canvas at (tile_x, tile_y), blended with tile_mask. Wire: "
+        "base_image=original_image, rendered=sampler output, "
+        "tile_mask=cropped_mask, tile_x=crop_x, tile_y=crop_y, "
+        "job=editor job output (carries the gallery pick)."
+    )
+
+    def merge(self, base_image, rendered, tile_mask, tile_x, tile_y, job="{}"):
+        try:
+            state = _parse_state(job)
+            base = _tensor_to_pil(base_image)
+            if base is None:
+                raise ValueError("invalid base_image tensor")
+            barr = np.asarray(base, dtype=np.float32) / 255.0
+            bh, bw = barr.shape[0], barr.shape[1]
+            m0 = None
+            try:
+                mt = tile_mask.detach() if isinstance(tile_mask, torch.Tensor) else None
+                if mt is not None:
+                    if mt.ndim == 3:
+                        mt = mt[0] if mt.shape[0] > 0 else None
+                    if mt is not None:
+                        m0 = np.asarray(mt.clamp(0, 1).cpu().numpy(), dtype=np.float32)
+            except Exception:
+                m0 = None
+            if m0 is None or m0.ndim != 2:
+                raise ValueError("invalid tile_mask tensor")
+            mh, mw = m0.shape[0], m0.shape[1]
+            n = 0
+            try:
+                if isinstance(rendered, torch.Tensor):
+                    n = int(rendered.shape[0]) if rendered.ndim == 4 else 1
+            except Exception:
+                n = 0
+            if n < 1:
+                raise ValueError("empty rendered batch")
+            choice = _pick_batch_index(n, state)
+            rpim = _tensor_to_pil(rendered, index=choice)
+            if rpim is None:
+                raise ValueError("invalid rendered tensor")
+            if rpim.size != (mw, mh):
+                print(
+                    f"[OutpaintMask] merge render {rpim.size} != tile {(mw, mh)}, resizing"
+                )
+                rpim = rpim.resize((mw, mh), Image.BILINEAR)
+            gen = np.asarray(rpim, dtype=np.float32) / 255.0
+            out = barr.copy()
+            x, y = int(tile_x), int(tile_y)
+            dx0, dy0 = max(0, x), max(0, y)
+            dx1, dy1 = min(bw, x + mw), min(bh, y + mh)
+            if dx1 > dx0 and dy1 > dy0:
+                sx0, sy0 = dx0 - x, dy0 - y
+                w_, h_ = dx1 - dx0, dy1 - dy0
+                m = m0[sy0 : sy0 + h_, sx0 : sx0 + w_][..., None]
+                t = gen[sy0 : sy0 + h_, sx0 : sx0 + w_, :]
+                reg = out[dy0:dy1, dx0:dx1, :]
+                out[dy0:dy1, dx0:dx1, :] = m * t + (1.0 - m) * reg
+            print(
+                f"[OutpaintMask] merged variant {choice} at+{x}+{y} "
+                f"tile {mw}x{mh} base {bw}x{bh}"
+            )
+            return (torch.from_numpy(out.astype(np.float32))[None,],)
+        except Exception as e:
+            print(f"[OutpaintMask] merge() failed: {e}")
+            traceback.print_exc()
+            try:
+                if isinstance(base_image, torch.Tensor) and base_image.ndim == 4:
+                    return (base_image[0:1].detach().cpu().float(),)
+            except Exception:
+                pass
+            return (torch.zeros((1, 64, 64, 3), dtype=torch.float32),)
+
+    @classmethod
+    def IS_CHANGED(s, base_image, rendered, tile_mask, tile_x, tile_y, job="{}"):
+        # Every tensor input is fingerprinted: a new render must always
+        # re-run the merge instead of serving a stale cache.
+        try:
+            parts = [f"{tile_x}x{tile_y}"]
+            parts.append(hashlib.sha256(str(job).encode("utf-8")).hexdigest()[:16])
+            for t in (base_image, rendered, tile_mask):
+                fp = _tensor_fp(t)
+                if fp is None:
+                    return float("nan")
+                parts.append(fp)
+            return ":".join(parts)
+        except Exception:
+            return str(time.time_ns())
+
+
 NODE_CLASS_MAPPINGS = {
     "OutpaintMaskEditor": OutpaintMaskEditor,
+    "OutpaintMerge": OutpaintMerge,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "OutpaintMaskEditor": "Outpaint Mask Editor",
+    "OutpaintMerge": "Outpaint Merge",
 }

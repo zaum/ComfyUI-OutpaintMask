@@ -69,6 +69,21 @@ Merge with the core Image Composite Masked node: destination=
 sampler worked at a different resolution), x=`crop_x`, y=`crop_y`,
 mask=`cropped_mask`, resize_source off. Original pixels stay bit-identical.
 
+## Two-node workflow (no circular connection)
+
+The editor node cannot feed its own outputs back into its own inputs, so
+the merge lives in a second node, **Outpaint Merge**:
+
+- editor `cropped_image`/`cropped_mask` → sampler → merge `rendered`,
+- editor `original_image` → merge `base_image`,
+- editor `cropped_mask` → merge `tile_mask`,
+- editor `crop_x`/`crop_y` → merge `tile_x`/`tile_y`,
+- editor `job` → merge `job` (carries the gallery pick),
+- merge `merged` → Preview / Save.
+
+The merge node resizes off-size renders to the tile, honors the gallery
+pick/drop from `job`, and blends only the outpaint part.
+
 ## Render variants gallery
 
 Connect the sampler output to the `rendered` input and add a `merged`
@@ -83,6 +98,8 @@ the editor's right-side strip lists every render variant as a thumbnail:
   it) and **✕** (red X: delete just this one),
 - OK writes the selection into the workflow (`render_pick` /
   `render_drop`); the backend merges that variant on the next run.
+- While a queue runs with the editor open, a thin blue strip under the
+  topbar shows the sampler progress.
 
 The node preview shows the original image on a neutral checkerboard
 canvas (outpaint area) with a thin frame border and no burned-in labels.
