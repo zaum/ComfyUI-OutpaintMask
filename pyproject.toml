@@ -1,0 +1,11 @@
+[project]
+name = "comfyui-outpaintmask"
+description = "Outpaint mask editor node: drag a frame around an image to build an outpaint mask."
+version = "1.14.2"
+license = { text = "MIT" }
+dependencies = []
+
+[tool.comfy]
+Publisher = ""
+DisplayName = "Outpaint Mask Editor"
+Icon = "🖌"
