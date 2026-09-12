@@ -3,7 +3,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-const VERSION = "1.16.0";
+const VERSION = "1.17.0";
 const NODE_NAME = "OutpaintMaskEditor";
 const SNAP = 8;                  // frame dims snap to multiples of this
 const EDGE_SNAP_PX = 10;         // screen-px tolerance for snapping to image edges
@@ -143,6 +143,7 @@ const CSS = `
 .opm-thumb.active{border-color:#2f6fed}
 .opm-thumb-tag{position:absolute;left:4px;top:4px;background:rgba(0,0,0,.65);color:#ddd;
   font-size:11px;padding:1px 6px;border-radius:4px;pointer-events:none}
+.opm-thumb-tag.final{background:rgba(31,122,51,.85);color:#fff}
 .opm-thumb-actions{position:absolute;right:calc(100% + 6px);top:50%;transform:translateY(-50%);
   display:none;flex-direction:column;gap:6px;z-index:5}
 .opm-thumb:hover .opm-thumb-actions,.opm-thumb:focus-within .opm-thumb-actions{display:flex}
@@ -300,6 +301,10 @@ const Editor = {
   // img}) + selected index (-1 = none). Rebuilt on every editor open.
   renders: [],
   renderSel: -1,
+  // Final composite session: backend merged result ({url, img}) shown as
+  // the gallery "Final" thumb; showFinal previews it on the workspace.
+  renderFinal: null,
+  showFinal: false,
   // One-shot cap flash: timestamp until which the frame shows solid amber.
   capFlashUntil: 0,
   _wasAtCap: false,
@@ -660,6 +665,8 @@ const Editor = {
     this.capFlashUntil = 0;
     this.renders = [];
     this.renderSel = -1;
+    this.renderFinal = null;
+    this.showFinal = false;
     this.hideProgress();
     if (this.ui) this.ui.overlay.classList.add("opm-hidden");
     if (this._raf) cancelAnimationFrame(this._raf);
@@ -855,24 +862,33 @@ const Editor = {
     // Original image.
     ctx.drawImage(this.img, X(0), Y(0), this.W * s, this.H * s);
 
-    // Selected render variant preview: the tile pasted at its box, then the
-    // source re-pasted over its own rect, so ONLY the outpaint part of the
-    // variant shows (original pixels stay intact).
-    const vsel = this.renderSel;
-    const vr = vsel >= 0 && vsel < this.renders.length ? this.renders[vsel] : null;
-    if (vr && vr.img && vr.img.naturalWidth > 0) {
-      ctx.drawImage(vr.img, X(f.x), Y(f.y), f.w * s, f.h * s);
-      const lx = -f.x;
-      const ly = -f.y;
-      const x0 = Math.max(0, -lx);
-      const y0 = Math.max(0, -ly);
-      const x1 = Math.min(this.W, f.w - lx);
-      const y1 = Math.min(this.H, f.h - ly);
-      if (x1 > x0 && y1 > y0) {
-        ctx.drawImage(
-          this.img, x0, y0, x1 - x0, y1 - y0,
-          X(lx + x0), Y(ly + y0), (x1 - x0) * s, (y1 - y0) * s
-        );
+    // Final composite preview: the backend merge result on the full canvas
+    // (its origin sits (tx,ty) left/above the tile origin). Otherwise the
+    // selected render variant: the tile pasted at its box, then the source
+    // re-pasted over its own rect, so ONLY the outpaint part of the variant
+    // shows (original pixels stay intact).
+    const fin = this.showFinal && this.renderFinal ? this.renderFinal.img : null;
+    if (fin && fin.naturalWidth > 0) {
+      const tx = Math.max(0, f.x);
+      const ty = Math.max(0, f.y);
+      ctx.drawImage(fin, X(f.x - tx), Y(f.y - ty), fin.naturalWidth * s, fin.naturalHeight * s);
+    } else {
+      const vsel = this.renderSel;
+      const vr = vsel >= 0 && vsel < this.renders.length ? this.renders[vsel] : null;
+      if (vr && vr.img && vr.img.naturalWidth > 0) {
+        ctx.drawImage(vr.img, X(f.x), Y(f.y), f.w * s, f.h * s);
+        const lx = -f.x;
+        const ly = -f.y;
+        const x0 = Math.max(0, -lx);
+        const y0 = Math.max(0, -ly);
+        const x1 = Math.min(this.W, f.w - lx);
+        const y1 = Math.min(this.H, f.h - ly);
+        if (x1 > x0 && y1 > y0) {
+          ctx.drawImage(
+            this.img, x0, y0, x1 - x0, y1 - y0,
+            X(lx + x0), Y(ly + y0), (x1 - x0) * s, (y1 - y0) * s
+          );
+        }
       }
     }
 
@@ -1778,6 +1794,22 @@ const Editor = {
     this.renderSel = this.renders.length
       ? Math.max(0, Math.min(st.render_pick || 0, this.renders.length - 1))
       : -1;
+    // Final composite thumb (backend merge result, if any this run).
+    this.renderFinal = null;
+    this.showFinal = false;
+    const mref = node && node._opm_merged;
+    const murl = mref ? buildViewURL(mref) : null;
+    if (murl) {
+      const fin = { url: murl, img: null };
+      this.renderFinal = fin;
+      loadImageURL(murl)
+        .then((im) => {
+          if (this.openFlag && this.renderFinal === fin) fin.img = im;
+        })
+        .catch(() => {
+          /* thumb still shows; preview skips until loaded */
+        });
+    }
     this.renderGallery();
   },
 
@@ -1828,17 +1860,43 @@ const Editor = {
       t.appendChild(acts);
       t.addEventListener("click", () => {
         this.renderSel = i;
+        this.showFinal = false;
         this.renderGallery();
       });
       t.addEventListener("dblclick", () => this.acceptVariant(i));
       t.addEventListener("keydown", (e) => {
         if (e.key === "Enter") {
           this.renderSel = i;
+          this.showFinal = false;
           this.renderGallery();
         }
       });
       list.appendChild(t);
     });
+    // Final composite thumb (backend merge result): previews the finished
+    // full canvas on the workspace. No accept/delete: it follows the runs.
+    if (this.renderFinal) {
+      const t = document.createElement("div");
+      t.className = "opm-thumb" + (this.showFinal ? " active" : "");
+      t.tabIndex = 0;
+      const im = document.createElement("img");
+      im.src = this.renderFinal.url;
+      im.alt = "Final composite";
+      const tag = document.createElement("span");
+      tag.className = "opm-thumb-tag final";
+      tag.textContent = "Final";
+      t.appendChild(im);
+      t.appendChild(tag);
+      const show = () => {
+        this.showFinal = true;
+        this.renderGallery();
+      };
+      t.addEventListener("click", show);
+      t.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") show();
+      });
+      list.appendChild(t);
+    }
   },
 
   acceptVariant(i) {
@@ -1847,6 +1905,10 @@ const Editor = {
     if (!this.renders[i]) return;
     this.renders = [this.renders[i]];
     this.renderSel = 0;
+    // The old Final no longer matches the new selection: it rebuilds on
+    // the next run.
+    this.renderFinal = null;
+    this.showFinal = false;
     this.renderGallery();
     showToast("Variant accepted - press OK to save it into the workflow.");
   },
@@ -1858,6 +1920,8 @@ const Editor = {
     if (!this.renders.length) this.renderSel = -1;
     else if (this.renderSel > i) this.renderSel--;
     else if (this.renderSel >= this.renders.length) this.renderSel = this.renders.length - 1;
+    this.renderFinal = null;
+    this.showFinal = false;
     this.renderGallery();
   },
 
@@ -2697,6 +2761,9 @@ api.addEventListener("executed", ({ detail }) => {
     // refreshes the gallery live.
     if (Array.isArray(out.renders)) node._opm_renders = out.renders;
     if (typeof out.render_n === "number") node._opm_render_n = out.render_n;
+    // Final composite (backend merge result) for the gallery "Final" thumb.
+    if (out.merged_ref && out.merged_ref.filename) node._opm_merged = out.merged_ref;
+    else node._opm_merged = null;
     if (Editor.openFlag && Editor.node === node) {
       try {
         Editor.loadRenders(node);

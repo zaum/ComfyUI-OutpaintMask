@@ -360,6 +360,32 @@ class OutpaintMaskEditor:
             merged_np = self._merge_rendered(
                 rendered, state, original_np, full_mask_np, tx, ty, cw, ch
             )
+            # Publish the final composite for the editor gallery (only when
+            # a render was actually merged - otherwise it would duplicate
+            # the full canvas).
+            merged_ref = None
+            if merged_np is not original_np:
+                try:
+                    buf = io.BytesIO()
+                    Image.fromarray(
+                        (np.clip(merged_np, 0.0, 1.0) * 255.0).astype(np.uint8), "RGB"
+                    ).save(buf, format="PNG", compress_level=1)
+                    data = buf.getvalue()
+                    m = hashlib.sha256(data)
+                    save_name = f"outpaint_merged_{m.hexdigest()[:16]}.png"
+                    dest = os.path.join(self._preview_dir(), save_name)
+                    if not os.path.isfile(dest):
+                        _atomic_write_png(dest, data)
+                    merged_ref = {
+                        "filename": save_name,
+                        "subfolder": PREVIEW_DIR_NAME,
+                        "type": "input",
+                    }
+                    _prune_dir(self._preview_dir(), ("outpaint_merged_",))
+                except Exception as e:
+                    print(f"[OutpaintMask] merged save failed: {e}")
+                    merged_ref = None
+            ui["merged_ref"] = merged_ref
             print(
                 f"[OutpaintMask] canvas {cw}x{ch} image {w}x{h} "
                 f"pads l={l} t={t} r={r} b={b} mask={pct:.1f}% "

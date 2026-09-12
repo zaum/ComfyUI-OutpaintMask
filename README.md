@@ -98,6 +98,10 @@ the editor's right-side strip lists every render variant as a thumbnail:
   it) and **✕** (red X: delete just this one),
 - OK writes the selection into the workflow (`render_pick` /
   `render_drop`); the backend merges that variant on the next run.
+- The finished composite comes back into the gallery as a green
+  **Final** thumbnail — click it to preview the full result on the
+  workspace (accept/delete do not apply to it; it rebuilds on the next
+  run).
 - While a queue runs with the editor open, a thin blue strip under the
   topbar shows the sampler progress.
 
