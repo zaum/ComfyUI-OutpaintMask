@@ -217,12 +217,18 @@ class OutpaintMaskEditor:
             },
             # optional IMAGE input: when another node's output is connected
             # here, it overrides the dropdown-selected image.
-            # rendered: the sampler output tile(s); the node merges the
-            # accepted variant (see render_pick/render_drop) onto the full
-            # canvas and returns it as merged.
+            # rendered is LAZY: the sampler output may be wired back into
+            # the same node without a circular-connection error (same
+            # pattern as InpaintCanvas result/result_local). The node first
+            # runs without it (crops + gallery refs), then re-runs merged
+            # once the sampler output resolves.
             "optional": {
                 "image_opt": ("IMAGE",),
-                "rendered": ("IMAGE",),
+                "rendered": ("IMAGE", {"lazy": True}),
+            },
+            "hidden": {
+                "prompt": "PROMPT",
+                "unique_id": "UNIQUE_ID",
             },
         }
 
@@ -259,10 +265,26 @@ class OutpaintMaskEditor:
         "CROP_X/CROP_Y (tile position). Feed the sampler output back into "
         "the RENDERED input and MERGED returns it pasted onto the full "
         "canvas (accepted gallery variant, originals bit-identical). The "
-        "Render button queues the workflow; the editor gallery lists the "
-        "render variants for preview (click), accept (green check) and "
-        "delete (red X)."
+        "RENDERED input is lazy, so it may be wired back into the same "
+        "node without a circular-connection error. The Render button "
+        "queues the workflow; the editor gallery lists the render variants "
+        "for preview (click), accept (green check) and delete (red X)."
     )
+
+    @classmethod
+    def check_lazy_status(cls, prompt=None, unique_id=None, **kwargs):
+        # Request the lazy sampler output only when it is actually wired:
+        # the prompt then holds [node_id, slot] for it. Unwired -> run
+        # immediately with rendered=None. (The core filters out already
+        # resolved inputs itself, so this is also safe on re-execution.)
+        try:
+            node = (prompt or {}).get(str(unique_id), {})
+            inputs = node.get("inputs", {})
+            if isinstance(inputs.get("rendered"), list):
+                return ["rendered"]
+        except Exception:
+            pass
+        return []
 
     @classmethod
     def VALIDATE_INPUTS(s, image, outpaint_state="{}", **kwargs):
@@ -278,7 +300,8 @@ class OutpaintMaskEditor:
 
     # ------------------------------------------------------------------ main
 
-    def load(self, image, outpaint_state="{}", image_opt=None, rendered=None):
+    def load(self, image, outpaint_state="{}", image_opt=None, rendered=None,
+             prompt=None, unique_id=None):
         try:
             state = _parse_state(outpaint_state)
             if image_opt is not None:

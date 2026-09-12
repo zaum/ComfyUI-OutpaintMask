@@ -69,7 +69,7 @@ Merge with the core Image Composite Masked node: destination=
 sampler worked at a different resolution), x=`crop_x`, y=`crop_y`,
 mask=`cropped_mask`, resize_source off. Original pixels stay bit-identical.
 
-## Two-node workflow (no circular connection)
+## Two-node workflow (separate merge node)
 
 The editor node cannot feed its own outputs back into its own inputs, so
 the merge lives in a second node, **Outpaint Merge**:
@@ -83,6 +83,15 @@ the merge lives in a second node, **Outpaint Merge**:
 
 The merge node resizes off-size renders to the tile, honors the gallery
 pick/drop from `job`, and blends only the outpaint part.
+
+## Single-graph feedback loop (lazy `rendered` input)
+
+Alternatively, wire the sampler output back into the **same** editor
+node's `rendered` input. That input is lazy (same pattern as
+InpaintCanvas `result`/`result_local`), so the loop is allowed: the node
+first runs the crops, then re-runs merged once the sampler output
+resolves. The gallery, Final thumb and `merged` output then all work in
+one graph with no second node.
 
 ## Render variants gallery
 
