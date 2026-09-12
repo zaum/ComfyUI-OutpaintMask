@@ -17,6 +17,7 @@ import folder_paths
 SIZE_SNAP = 8
 PREVIEW_DIR_NAME = "outpaint_mask"
 PREVIEW_KEEP = 50
+RENDER_KEEP_N = 8            # max render variants kept for the editor gallery
 MAX_PREVIEW_SIDE = 1024
 MAX_PAD = 16384               # absolute clamp for frame pads (negative pad = crop)
 
@@ -36,8 +37,13 @@ def _parse_state(raw):
 
     Pads (l/t/r/b) may be negative: a negative pad means the frame cuts
     inside the image on that side, i.e. the node output is CROPPED there.
+    render_pick/render_drop select the accepted render variant (see the
+    editor gallery): pick is an index into the batch minus dropped items.
     """
-    st = {"l": 0, "t": 0, "r": 0, "b": 0, "mp_on": True, "mp": 2.0}
+    st = {
+        "l": 0, "t": 0, "r": 0, "b": 0, "mp_on": True, "mp": 2.0,
+        "render_pick": 0, "render_drop": [],
+    }
     try:
         data = json.loads(raw) if raw else {}
         if isinstance(data, dict):
@@ -51,13 +57,58 @@ def _parse_state(raw):
                 st["mp"] = float(np.clip(float(data.get("mp", 2.0)), 0.05, 8.0))
             except Exception:
                 pass
+            try:
+                st["render_pick"] = max(0, int(data.get("render_pick", 0)))
+            except Exception:
+                pass
+            try:
+                drop = data.get("render_drop", [])
+                if isinstance(drop, (list, tuple)):
+                    st["render_drop"] = sorted({max(0, int(v)) for v in drop})
+            except Exception:
+                pass
     except Exception:
         pass
     return st
 
 
-def _tensor_to_pil(image_opt):
-    """Normalize any IMAGE tensor to an HWC uint8 PIL image, or None."""
+def _tensor_fp(t):
+    """Sampled content fingerprint for an IMAGE tensor (or None).
+
+    Same sampled-hash scheme the node uses for change detection: shape +
+    dtype + a strided content sample, so a new render always re-runs the
+    merge instead of serving a stale cache.
+    """
+    try:
+        if not isinstance(t, torch.Tensor):
+            return None
+        t = t.detach()
+        if t.ndim == 4:
+            if t.shape[0] < 1:
+                return None
+            t = t[0]
+        fp = f"{tuple(t.shape)}:{t.dtype}"
+        flat = t.contiguous().view(-1) if t.is_contiguous() else t.reshape(-1)
+        n = flat.numel()
+        if n > 0:
+            step = max(1, n // 4096)
+            sample = flat[::step][:4096]
+            try:
+                b = sample.to("cpu").contiguous().numpy().tobytes()
+            except Exception:
+                b = str(sample.to("cpu").tolist()[:256]).encode("utf-8")
+            fp += ":" + hashlib.sha256(b).hexdigest()[:16]
+        return fp
+    except Exception:
+        return None
+
+
+def _tensor_to_pil(image_opt, index=0):
+    """Normalize any IMAGE tensor to an HWC uint8 PIL image, or None.
+
+    index selects the batch item (clamped); the gallery accept flow picks
+    the render variant this way.
+    """
     try:
         t = image_opt
         if isinstance(t, torch.Tensor):
@@ -65,7 +116,7 @@ def _tensor_to_pil(image_opt):
             if t.ndim == 4:
                 if t.shape[0] < 1:
                     return None
-                t = t[0]
+                t = t[max(0, min(int(index), t.shape[0] - 1))]
             elif t.ndim == 2:
                 t = t.unsqueeze(-1)
             t = t.clamp(0, 1).cpu().numpy()
@@ -151,9 +202,13 @@ class OutpaintMaskEditor:
                 "outpaint_state": ("STRING", {"default": "{}"}),
             },
             # optional IMAGE input: when another node's output is connected
-            # here, it overrides the dropdown-selected image
+            # here, it overrides the dropdown-selected image.
+            # rendered: the sampler output tile(s); the node merges the
+            # accepted variant (see render_pick/render_drop) onto the full
+            # canvas and returns it as merged.
             "optional": {
                 "image_opt": ("IMAGE",),
+                "rendered": ("IMAGE",),
             },
         }
 
@@ -162,16 +217,17 @@ class OutpaintMaskEditor:
     # cropped_image/cropped_mask go to the sampler. original_image is the
     # FULL canvas (whole source + positive outpaint expansion, nothing
     # cropped away) with the source on mid-gray. crop_x/crop_y is the tile
-    # top-left on the full canvas; merge with the tile mask, e.g. via the
-    # core Image Composite Masked node:
-    # composite(original_image, rendered, crop_x, crop_y, cropped_mask).
-    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", "INT", "INT")
+    # top-left on the full canvas; merged is the accepted render variant
+    # pasted back (original pixels stay bit-identical, or the full canvas
+    # itself while rendered is unconnected).
+    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", "INT", "INT", "IMAGE")
     RETURN_NAMES = (
         "cropped_image",
         "cropped_mask",
         "original_image",
         "crop_x",
         "crop_y",
+        "merged",
     )
     OUTPUT_NODE = True
     FUNCTION = "load"
@@ -183,9 +239,12 @@ class OutpaintMaskEditor:
         "size and context by hand, it may cut into the source). Outputs "
         "CROPPED_IMAGE + CROPPED_MASK for the sampler, ORIGINAL_IMAGE (full "
         "canvas: whole source + outpaint, nothing cropped away), "
-        "CROP_X/CROP_Y (tile position). Merge e.g. with the core Image "
-        "Composite Masked node: destination=original_image, source=rendered "
-        "tile, x=crop_x, y=crop_y, mask=cropped_mask."
+        "CROP_X/CROP_Y (tile position). Feed the sampler output back into "
+        "the RENDERED input and MERGED returns it pasted onto the full "
+        "canvas (accepted gallery variant, originals bit-identical). The "
+        "Render button queues the workflow; the editor gallery lists the "
+        "render variants for preview (click), accept (green check) and "
+        "delete (red X)."
     )
 
     @classmethod
@@ -202,7 +261,7 @@ class OutpaintMaskEditor:
 
     # ------------------------------------------------------------------ main
 
-    def load(self, image, outpaint_state="{}", image_opt=None):
+    def load(self, image, outpaint_state="{}", image_opt=None, rendered=None):
         try:
             state = _parse_state(outpaint_state)
             if image_opt is not None:
@@ -252,25 +311,43 @@ class OutpaintMaskEditor:
                 out_mask[iy0:iy1, ix0:ix1] = 0.0
 
             prev_ref = self._save_preview(src, cw, ch, l, t, w, h)
+            render_refs = self._save_renders(rendered, cw, ch)
+            try:
+                if isinstance(rendered, torch.Tensor) and rendered.ndim == 4:
+                    render_n = int(rendered.shape[0])
+                elif rendered is not None:
+                    render_n = 1
+                else:
+                    render_n = 0
+            except Exception:
+                render_n = 0
             ui = {
                 "images": [prev_ref] if prev_ref else [],
                 "source": [src_ref],
                 "state": json.dumps(state),
+                "renders": render_refs,
+                "render_n": render_n,
             }
             pct = float((out_mask > 0.5).mean()) * 100.0
             # Full merge canvas: the WHOLE source plus the positive outpaint
             # expansion (negative pads never shrink it). The tile sits on it
-            # at (tx, ty); the mask is white outside the source rect.
+            # at (tx, ty); the merge mask is white outside the source rect.
             lp, tp, rp, bp = max(l, 0), max(t, 0), max(r, 0), max(b, 0)
             tx, ty = lp - l, tp - t
             fw = _ceil_snap(max(SIZE_SNAP, w + lp + rp, tx + cw))
             fh = _ceil_snap(max(SIZE_SNAP, h + tp + bp, ty + ch))
             original_np = np.full((fh, fw, 3), 0.5, dtype=np.float32)
             original_np[tp : tp + h, lp : lp + w, :] = arr
+            full_mask_np = np.ones((fh, fw), dtype=np.float32)
+            full_mask_np[tp : tp + h, lp : lp + w] = 0.0
+            merged_np = self._merge_rendered(
+                rendered, state, original_np, full_mask_np, tx, ty, cw, ch
+            )
             print(
                 f"[OutpaintMask] canvas {cw}x{ch} image {w}x{h} "
                 f"pads l={l} t={t} r={r} b={b} mask={pct:.1f}% "
-                f"full {fw}x{fh} tile+{tx}+{ty}"
+                f"full {fw}x{fh} tile+{tx}+{ty} "
+                f"renders={len(render_refs)} merged={'yes' if merged_np is not original_np else 'no'}"
             )
             return {
                 "ui": ui,
@@ -280,6 +357,7 @@ class OutpaintMaskEditor:
                     torch.from_numpy(original_np)[None,],
                     tx,
                     ty,
+                    torch.from_numpy(merged_np)[None,],
                 ),
             }
         except Exception as e:
@@ -357,6 +435,80 @@ class OutpaintMaskEditor:
             return None
         return {"filename": save_name, "subfolder": PREVIEW_DIR_NAME, "type": "input"}
 
+    def _save_renders(self, rendered, cw, ch):
+        """Persist the sampler output batch for the editor gallery.
+
+        Each variant is stored at tile size (paste-ready) and returned as a
+        /view ref. Capped so a big batch cannot flood the input dir.
+        """
+        refs = []
+        try:
+            if not isinstance(rendered, torch.Tensor):
+                return refs
+            n = int(rendered.shape[0]) if rendered.ndim == 4 else 1
+            for i in range(min(n, RENDER_KEEP_N)):
+                try:
+                    pim = _tensor_to_pil(rendered, index=i)
+                    if pim is None:
+                        continue
+                    if pim.size != (cw, ch):
+                        pim = pim.resize((cw, ch), Image.BILINEAR)
+                    buf = io.BytesIO()
+                    pim.save(buf, format="PNG", compress_level=1)
+                    data = buf.getvalue()
+                    m = hashlib.sha256(data)
+                    save_name = f"outpaint_render_{m.hexdigest()[:16]}.png"
+                    dest = os.path.join(self._preview_dir(), save_name)
+                    if not os.path.isfile(dest):
+                        _atomic_write_png(dest, data)
+                    refs.append(
+                        {"filename": save_name, "subfolder": PREVIEW_DIR_NAME, "type": "input"}
+                    )
+                except Exception as e:
+                    print(f"[OutpaintMask] render save failed (item {i}): {e}")
+            _prune_dir(self._preview_dir(), ("outpaint_render_",))
+            if n > RENDER_KEEP_N:
+                print(f"[OutpaintMask] batch has {n} renders, gallery keeps {RENDER_KEEP_N}")
+        except Exception as e:
+            print(f"[OutpaintMask] render save failed: {e}")
+        return refs
+
+    def _merge_rendered(self, rendered, state, full_np, full_mask_np, tx, ty, cw, ch):
+        """Paste the accepted render variant onto the full canvas.
+
+        Selection = state render_pick / render_drop (editor gallery): pick is
+        an index into the batch minus dropped items. The variant is resized
+        to tile size when the sampler worked at another resolution, and only
+        the outpaint part lands (mask blend) so originals stay bit-identical.
+        No usable render: returns the full canvas itself (pass-through).
+        """
+        try:
+            if not isinstance(rendered, torch.Tensor):
+                return full_np
+            n = int(rendered.shape[0]) if rendered.ndim == 4 else 1
+            if n < 1:
+                return full_np
+            drop = set(state.get("render_drop", []) or [])
+            avail = [i for i in range(n) if i not in drop] or [0]
+            pick = int(state.get("render_pick", 0) or 0)
+            choice = avail[max(0, min(pick, len(avail) - 1))]
+            pim = _tensor_to_pil(rendered, index=choice)
+            if pim is None:
+                return full_np
+            if pim.size != (cw, ch):
+                print(
+                    f"[OutpaintMask] render {pim.size} != tile {(cw, ch)}, resizing"
+                )
+                pim = pim.resize((cw, ch), Image.BILINEAR)
+            gen = np.asarray(pim, dtype=np.float32) / 255.0
+            placed = full_np.copy()
+            placed[ty : ty + ch, tx : tx + cw, :] = gen
+            m = full_mask_np[..., None]
+            return (m * placed + (1.0 - m) * full_np).astype(np.float32)
+        except Exception as e:
+            print(f"[OutpaintMask] merge failed: {e}")
+            return full_np
+
     def _error_fallback(self, image_opt):
         """Bulletproof fallback: never raises, always returns valid tensors."""
         w, h = 256, 256
@@ -389,49 +541,39 @@ class OutpaintMaskEditor:
         # Result arity must always match RETURN_TYPES.
         return {
             "ui": {"images": ui_images},
-            "result": (out_image, out_mask, out_image, 0, 0),
+            "result": (out_image, out_mask, out_image, 0, 0, out_image),
         }
 
     @classmethod
-    def IS_CHANGED(s, image, outpaint_state="{}", image_opt=None, **kwargs):
+    def IS_CHANGED(s, image, outpaint_state="{}", image_opt=None, rendered=None, **kwargs):
         # Fast, crash-proof change detection: mtime + size of the source file
         # plus a hash of the frame state, so editing the frame in the UI also
-        # re-runs the node. When an IMAGE tensor is connected upstream, its
-        # content is fingerprinted too - otherwise swapping the upstream image
-        # would go unnoticed and the node would stale-cache.
+        # re-runs the node. Connected IMAGE tensors (upstream image, sampler
+        # output) are fingerprinted too - otherwise swapping them would go
+        # unnoticed and the node would stale-cache (a new render must always
+        # re-run the merge).
         state_hash = hashlib.sha256(str(outpaint_state).encode("utf-8")).hexdigest()[:16]
         try:
+            render_fp = "render:none"
+            if rendered is not None:
+                render_fp = _tensor_fp(rendered)
+                if render_fp is None:
+                    # Fingerprint failed: always re-run rather than risk a
+                    # stale merge.
+                    return float("nan")
+                render_fp = "render:" + render_fp
             if image_opt is not None:
-                try:
-                    t = image_opt.detach() if isinstance(image_opt, torch.Tensor) else None
-                    if t is not None:
-                        if t.ndim == 4:
-                            if t.shape[0] < 1:
-                                return str(time.time_ns())
-                            t = t[0]
-                        fp = f"{tuple(t.shape)}:{t.dtype}"
-                        flat = t.contiguous().view(-1) if t.is_contiguous() else t.reshape(-1)
-                        n = flat.numel()
-                        if n > 0:
-                            step = max(1, n // 4096)
-                            sample = flat[::step][:4096]
-                            try:
-                                b = sample.to("cpu").contiguous().numpy().tobytes()
-                            except Exception:
-                                b = str(sample.to("cpu").tolist()[:256]).encode("utf-8")
-                            fp += ":" + hashlib.sha256(b).hexdigest()[:16]
-                        return fp + ":" + state_hash
-                except Exception:
-                    pass
-                # Fingerprint failed: always re-run rather than risk a stale cache.
-                return float("nan")
+                fp = _tensor_fp(image_opt)
+                if fp is None:
+                    return float("nan")
+                return fp + ":" + state_hash + ":" + render_fp
             img_path = folder_paths.get_annotated_filepath(image)
             try:
                 stt = os.stat(img_path)
                 h = f"{stt.st_mtime_ns}:{stt.st_size}"
             except Exception:
                 h = str(image)
-            return h + ":" + state_hash
+            return h + ":" + state_hash + ":" + render_fp
         except Exception:
             return str(time.time_ns())
 

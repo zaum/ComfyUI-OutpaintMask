@@ -3,7 +3,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-const VERSION = "1.14.2";
+const VERSION = "1.15.0";
 const NODE_NAME = "OutpaintMaskEditor";
 const SNAP = 8;                  // frame dims snap to multiples of this
 const EDGE_SNAP_PX = 10;         // screen-px tolerance for snapping to image edges
@@ -121,8 +121,32 @@ const CSS = `
 .opm-mp-toggle.on{background:#2f6fed;border-color:#2f6fed;color:#fff}
 .opm-mp-toggle svg{width:15px;height:15px;display:block;fill:currentColor}
 .opm-sep{width:1px;height:22px;background:#333;margin:0 4px}
-.opm-viewport{flex:1;position:relative;overflow:hidden;background:#141414;touch-action:none}
+.opm-mid{flex:1;display:flex;min-height:0;min-width:0}
+.opm-viewport{flex:1;position:relative;overflow:hidden;background:#141414;touch-action:none;min-width:0}
 .opm-viewport canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.opm-side{width:136px;flex:none;background:#161616;border-left:1px solid #2c2c2c;
+  display:flex;flex-direction:column;min-height:0}
+.opm-side-title{padding:8px 10px 4px;color:#8a8a8a;font-size:12px;flex:none}
+.opm-render-list{flex:1;overflow-y:auto;padding:4px 8px 10px;display:flex;
+  flex-direction:column;gap:10px}
+.opm-render-empty{color:#666;font-size:12px;padding:6px 2px;line-height:1.5}
+.opm-thumb{position:relative;flex:none;cursor:pointer;border:2px solid transparent;
+  border-radius:6px;overflow:visible;background:#0f0f0f}
+.opm-thumb img{display:block;width:100%;height:auto;border-radius:4px}
+.opm-thumb:hover{border-color:#4a86e8}
+.opm-thumb.active{border-color:#2f6fed}
+.opm-thumb-tag{position:absolute;left:4px;top:4px;background:rgba(0,0,0,.65);color:#ddd;
+  font-size:11px;padding:1px 6px;border-radius:4px;pointer-events:none}
+.opm-thumb-actions{position:absolute;right:calc(100% + 6px);top:50%;transform:translateY(-50%);
+  display:none;flex-direction:column;gap:6px;z-index:5}
+.opm-thumb:hover .opm-thumb-actions,.opm-thumb:focus-within .opm-thumb-actions{display:flex}
+.opm-thumb-act{width:28px;height:28px;border-radius:50%;border:1px solid #555;
+  color:#fff;font-size:15px;line-height:1;cursor:pointer;display:flex;
+  align-items:center;justify-content:center;padding:0}
+.opm-thumb-accept{background:#1f7a33;border-color:#2ea34d}
+.opm-thumb-accept:hover{background:#27a047}
+.opm-thumb-drop{background:#8c2020;border-color:#c03a3a}
+.opm-thumb-drop:hover{background:#b02828}
 .opm-status{display:flex;align-items:center;gap:10px;padding:7px 14px;background:#1b1b1b;
   border-top:1px solid #2c2c2c;color:#bbb;font-size:12.5px}
 .opm-status b{color:#8cf;font-weight:600}
@@ -136,11 +160,16 @@ const CSS = `
   color:#ffb3c0;border:1px solid #5a2a35;padding:8px 14px;border-radius:8px;z-index:2000001;
   font:13px system-ui,Segoe UI,sans-serif}
 .opm-open-wrap{height:34px;min-height:34px;max-height:34px;overflow:hidden;display:flex;
-  align-items:stretch;box-sizing:border-box;flex:none;width:100%}
+  align-items:stretch;gap:6px;box-sizing:border-box;flex:none;width:100%}
 .opm-open-btn{background:linear-gradient(#3a76d8,#2b62b8);color:#fff;border:1px solid #4a86e8;
   border-radius:6px;cursor:pointer;font-size:13px;width:100%;height:32px;min-height:32px;
   max-height:32px;box-sizing:border-box;flex:1;line-height:30px;padding:0 12px;white-space:nowrap}
 .opm-open-btn:hover{filter:brightness(1.1)}
+.opm-render-btn{background:#2a2a2a;border:1px solid #3c3c3c;color:#ddd;border-radius:6px;
+  cursor:pointer;font-size:13px;height:32px;min-height:32px;max-height:32px;flex:0 0 auto;
+  box-sizing:border-box;line-height:30px;padding:0 14px;white-space:nowrap}
+.opm-render-btn:hover{background:#353535}
+.opm-render-btn:disabled{opacity:.45;cursor:wait}
 img.opm-tint{position:absolute;z-index:5;pointer-events:auto;cursor:pointer;border:none;outline:none;object-fit:contain;background:#0f0f0f}
 .opm-preview-box{position:relative}
 .opm-preview-paste{position:relative;z-index:20}
@@ -174,7 +203,7 @@ function mpFromWh(w, h) {
 }
 
 function parseState(raw) {
-  const st = { v: 1, l: 0, t: 0, r: 0, b: 0, mp_on: true, mp: DEFAULT_MP, unit: "px", dpi: DEFAULT_DPI };
+  const st = { v: 1, l: 0, t: 0, r: 0, b: 0, mp_on: true, mp: DEFAULT_MP, unit: "px", dpi: DEFAULT_DPI, render_pick: 0, render_drop: [] };
   try {
     const data = JSON.parse(raw || "{}");
     if (data && typeof data === "object") {
@@ -191,6 +220,14 @@ function parseState(raw) {
       st.unit = data.unit === "mm" ? "mm" : "px";
       const dpi = Number(data.dpi);
       st.dpi = Number.isFinite(dpi) ? clamp(Math.round(dpi), 1, 2400) : DEFAULT_DPI;
+      // Render gallery selection: accepted variant index + dropped batch
+      // indices (backend merges the pick; missing keys mean "first").
+      const pick = Number(data.render_pick);
+      st.render_pick = Number.isFinite(pick) ? Math.max(0, Math.round(pick)) : 0;
+      const drop = data.render_drop;
+      st.render_drop = Array.isArray(drop)
+        ? [...new Set(drop.map((v) => Math.max(0, Math.round(Number(v)))).filter((v) => Number.isFinite(v)))]
+        : [];
     }
   } catch (e) {
     /* keep defaults */
@@ -258,6 +295,10 @@ const Editor = {
   offY: 0,
   drag: null,
   hover: null,
+  // Render variant gallery session: kept sampler outputs ({batchIdx, url,
+  // img}) + selected index (-1 = none). Rebuilt on every editor open.
+  renders: [],
+  renderSel: -1,
   // One-shot cap flash: timestamp until which the frame shows solid amber.
   capFlashUntil: 0,
   _wasAtCap: false,
@@ -312,7 +353,13 @@ const Editor = {
           <button class="opm-btn primary wide" id="opm-ok" title="Apply mask (Enter)">OK</button>
         </div>
       </div>
-      <div class="opm-viewport" id="opm-viewport"><canvas id="opm-canvas"></canvas></div>
+      <div class="opm-mid">
+        <div class="opm-viewport" id="opm-viewport"><canvas id="opm-canvas"></canvas></div>
+        <div class="opm-side" id="opm-side">
+          <div class="opm-side-title">Renders</div>
+          <div class="opm-render-list" id="opm-render-list"></div>
+        </div>
+      </div>
       <div class="opm-status">
         <span id="opm-info-img"></span>
         <span class="opm-arrow">→</span>
@@ -347,6 +394,7 @@ const Editor = {
       okBtn: overlay.querySelector("#opm-ok"),
       infoImg: overlay.querySelector("#opm-info-img"),
       infoFrame: overlay.querySelector("#opm-info-frame"),
+      renderList: overlay.querySelector("#opm-render-list"),
     };
     this.wireEvents();
   },
@@ -542,6 +590,11 @@ const Editor = {
       this.resetFrame();
     }
 
+    // Render variant gallery session (sampler output batch, if any).
+    this.renders = [];
+    this.renderSel = -1;
+    this.loadRenders(node);
+
     this.ui.overlay.classList.remove("opm-hidden");
     this.openFlag = true;
     this.drag = null;
@@ -569,6 +622,8 @@ const Editor = {
     this.drag = null;
     this.hover = null;
     this.capFlashUntil = 0;
+    this.renders = [];
+    this.renderSel = -1;
     if (this.ui) this.ui.overlay.classList.add("opm-hidden");
     if (this._raf) cancelAnimationFrame(this._raf);
     this._raf = null;
@@ -762,6 +817,27 @@ const Editor = {
 
     // Original image.
     ctx.drawImage(this.img, X(0), Y(0), this.W * s, this.H * s);
+
+    // Selected render variant preview: the tile pasted at its box, then the
+    // source re-pasted over its own rect, so ONLY the outpaint part of the
+    // variant shows (original pixels stay intact).
+    const vsel = this.renderSel;
+    const vr = vsel >= 0 && vsel < this.renders.length ? this.renders[vsel] : null;
+    if (vr && vr.img && vr.img.naturalWidth > 0) {
+      ctx.drawImage(vr.img, X(f.x), Y(f.y), f.w * s, f.h * s);
+      const lx = -f.x;
+      const ly = -f.y;
+      const x0 = Math.max(0, -lx);
+      const y0 = Math.max(0, -ly);
+      const x1 = Math.min(this.W, f.w - lx);
+      const y1 = Math.min(this.H, f.h - ly);
+      if (x1 > x0 && y1 > y0) {
+        ctx.drawImage(
+          this.img, x0, y0, x1 - x0, y1 - y0,
+          X(lx + x0), Y(ly + y0), (x1 - x0) * s, (y1 - y0) * s
+        );
+      }
+    }
 
     // Frame border: a manual resize growing into the MP cap fires ONE short
     // solid-amber flash (a single blink, never repeating). Otherwise thin
@@ -1597,6 +1673,19 @@ const Editor = {
 
   save() {
     const f = this.frame;
+    // Gallery pick/drop persisted for the backend merge: pick is the index
+    // of the selected variant inside the kept list (or 0), drop holds every
+    // batch index not kept.
+    const kept = (this.renders || []).map((r) => r.batchIdx);
+    const n = Math.max(
+      Number((this.node && this.node._opm_render_n) || 0),
+      ...kept.map((v) => v + 1),
+      0
+    );
+    const drop = [];
+    for (let i = 0; i < n; i++) if (!kept.includes(i)) drop.push(i);
+    const pick =
+      this.renderSel >= 0 && this.renderSel < kept.length ? this.renderSel : 0;
     const st = {
       v: 1,
       // Pads may be negative (crop); the frame always touches or overlaps
@@ -1610,6 +1699,8 @@ const Editor = {
       // Display-only settings (the backend ignores these keys).
       unit: this.unit,
       dpi: this.dpi,
+      render_pick: pick,
+      render_drop: drop,
     };
     this.setState(this.node, st);
     const url = this.drawComposite();
@@ -1619,6 +1710,118 @@ const Editor = {
     }
     if (app.graph && app.graph.change) app.graph.change();
     this.close();
+  },
+
+  // ------------------------------------------------------------ render gallery
+
+  loadRenders(node) {
+    // Session copy of the sampler output batch (executed event refs):
+    // dropped batch indices stay hidden, selection restores the saved pick.
+    const refs = (node && node._opm_renders) || [];
+    const st = this.getState(node);
+    const drop = new Set(st.render_drop || []);
+    this.renders = [];
+    refs.forEach((ref, i) => {
+      if (drop.has(i)) return;
+      const url = buildViewURL(ref);
+      if (!url) return;
+      this.renders.push({ batchIdx: i, url, img: null });
+    });
+    // Full-size images for the workspace paste-preview (thumbs use the URL
+    // directly, the browser scales them).
+    this.renders.forEach((r) => {
+      loadImageURL(r.url)
+        .then((im) => {
+          if (this.openFlag) r.img = im;
+        })
+        .catch(() => {
+          /* thumb still shows; preview skips until loaded */
+        });
+    });
+    this.renderSel = this.renders.length
+      ? Math.max(0, Math.min(st.render_pick || 0, this.renders.length - 1))
+      : -1;
+    this.renderGallery();
+  },
+
+  renderGallery() {
+    const ui = this.ui;
+    if (!ui || !ui.renderList) return;
+    const list = ui.renderList;
+    list.innerHTML = "";
+    if (!this.renders.length) {
+      const d = document.createElement("div");
+      d.className = "opm-render-empty";
+      d.textContent = "No renders yet - press Render on the node, then open the editor.";
+      list.appendChild(d);
+      return;
+    }
+    this.renders.forEach((r, i) => {
+      const t = document.createElement("div");
+      t.className = "opm-thumb" + (i === this.renderSel ? " active" : "");
+      t.tabIndex = 0;
+      const im = document.createElement("img");
+      im.src = r.url;
+      im.alt = `Render option ${i + 1}`;
+      const tag = document.createElement("span");
+      tag.className = "opm-thumb-tag";
+      tag.textContent = `V${i + 1}`;
+      const acts = document.createElement("div");
+      acts.className = "opm-thumb-actions";
+      const ok = document.createElement("button");
+      ok.className = "opm-thumb-act opm-thumb-accept";
+      ok.textContent = "✓";
+      ok.title = "Accept: keep only this one and use it";
+      ok.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.acceptVariant(i);
+      });
+      const del = document.createElement("button");
+      del.className = "opm-thumb-act opm-thumb-drop";
+      del.textContent = "✕";
+      del.title = "Delete this option";
+      del.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.dropVariant(i);
+      });
+      acts.appendChild(ok);
+      acts.appendChild(del);
+      t.appendChild(im);
+      t.appendChild(tag);
+      t.appendChild(acts);
+      t.addEventListener("click", () => {
+        this.renderSel = i;
+        this.renderGallery();
+      });
+      t.addEventListener("dblclick", () => this.acceptVariant(i));
+      t.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          this.renderSel = i;
+          this.renderGallery();
+        }
+      });
+      list.appendChild(t);
+    });
+  },
+
+  acceptVariant(i) {
+    // Green check: delete every other option and use this one. The pick is
+    // stored into the workflow on OK; the backend merges it on next run.
+    if (!this.renders[i]) return;
+    this.renders = [this.renders[i]];
+    this.renderSel = 0;
+    this.renderGallery();
+    showToast("Variant accepted - press OK to save it into the workflow.");
+  },
+
+  dropVariant(i) {
+    // Red X: delete only this option from the session gallery.
+    if (i < 0 || i >= this.renders.length) return;
+    this.renders.splice(i, 1);
+    if (!this.renders.length) this.renderSel = -1;
+    else if (this.renderSel > i) this.renderSel--;
+    else if (this.renderSel >= this.renders.length) this.renderSel = this.renders.length - 1;
+    this.renderGallery();
   },
 
   drawComposite() {
@@ -2183,10 +2386,40 @@ function openEditorSafe(node) {
   });
 }
 
+function queueRender(node) {
+  // Render button: queues the current workflow (same as Ctrl+Enter). The
+  // sampler output flows into the rendered input, the merge runs, and the
+  // variants land in the editor gallery.
+  try {
+    if (node && typeof node.setDirtyCanvas === "function") {
+      try {
+        node.setDirtyCanvas(true, true);
+      } catch (e) {
+        /* ignore */
+      }
+    }
+    if (app && typeof app.queuePrompt === "function") {
+      const r = app.queuePrompt(0);
+      if (r && typeof r.catch === "function") {
+        r.catch((err) => {
+          console.error("[OutpaintMask] queue failed:", err);
+          showToast("Render queue failed (see console).");
+        });
+      }
+      return;
+    }
+    showToast("Auto-queue unavailable here - press Ctrl+Enter to render.");
+  } catch (e) {
+    console.error("[OutpaintMask] queue failed:", e);
+    showToast("Render queue failed (see console).");
+  }
+}
+
 function makeOpenButtonEl(node) {
-  // Fixed-height wrapper so the button never grows vertically.
+  // Fixed-height wrapper so the buttons never grow vertically: the editor
+  // opener (flex) plus the Render shortcut (fixed) side by side.
   // Inject CSS here (not only on first editor open): otherwise the node
-  // button renders unstyled until the user clicks it once.
+  // buttons render unstyled until the user clicks one once.
   injectCss();
   const wrap = document.createElement("div");
   wrap.className = "opm-open-wrap";
@@ -2198,7 +2431,17 @@ function makeOpenButtonEl(node) {
     e.stopPropagation();
     openEditorSafe(node);
   });
+  const r = document.createElement("button");
+  r.className = "opm-render-btn";
+  r.textContent = "Render";
+  r.title = "Queue the current workflow (renders the tile into the gallery)";
+  r.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    queueRender(node);
+  });
   wrap.appendChild(b);
+  wrap.appendChild(r);
   node._opm_openBtn = wrap;
   return wrap;
 }
@@ -2416,6 +2659,18 @@ api.addEventListener("executed", ({ detail }) => {
     if (!node || (node.comfyClass !== NODE_NAME && node.type !== NODE_NAME)) return;
     const out = detail.output || {};
     if (Array.isArray(out.source) && out.source[0]) node._opm_source = out.source[0];
+    // Sampler output batch for the editor render gallery (+ batch size, so
+    // the gallery can compute the drop list). A run while the editor is open
+    // refreshes the gallery live.
+    if (Array.isArray(out.renders)) node._opm_renders = out.renders;
+    if (typeof out.render_n === "number") node._opm_render_n = out.render_n;
+    if (Editor.openFlag && Editor.node === node) {
+      try {
+        Editor.loadRenders(node);
+      } catch (e) {
+        /* gallery refresh is best-effort */
+      }
+    }
     // A fresh backend preview retires our instant replacement overlay (the
     // backend image carries the new size label).
     try {

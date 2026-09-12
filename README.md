@@ -69,6 +69,21 @@ Merge with the core Image Composite Masked node: destination=
 sampler worked at a different resolution), x=`crop_x`, y=`crop_y`,
 mask=`cropped_mask`, resize_source off. Original pixels stay bit-identical.
 
+## Render variants gallery
+
+Connect the sampler output to the `rendered` input and add a `merged`
+output downstream: `merged` is the accepted variant pasted onto the full
+canvas (or the full canvas itself while `rendered` is unconnected). The
+**Render** button next to the editor opener queues the current workflow;
+the editor's right-side strip lists every render variant as a thumbnail:
+
+- click a thumbnail (or Enter) to preview it on the workspace — only the
+  outpaint part shows, originals stay intact; double-click accepts it,
+- hover a thumbnail for **✓** (green check: keep only this one and use
+  it) and **✕** (red X: delete just this one),
+- OK writes the selection into the workflow (`render_pick` /
+  `render_drop`); the backend merges that variant on the next run.
+
 The node preview shows the original image on a neutral checkerboard
 canvas (outpaint area) with a thin frame border and no burned-in labels.
 On OK the preview is instantly replaced (aspect-correct) with the new
