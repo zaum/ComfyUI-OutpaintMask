@@ -3,7 +3,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-const VERSION = "1.18.3";
+const VERSION = "1.18.4";
 const NODE_NAME = "OutpaintMaskEditor";
 const SNAP = 8;                  // frame dims snap to multiples of this
 const EDGE_SNAP_PX = 10;         // screen-px tolerance for snapping to image edges
@@ -261,6 +261,33 @@ function loadImageURL(url) {
   });
 }
 
+// Collect every executed image ref, whatever the output is named
+// (samplers use IMAGE, previews use images, ...).
+function collectExecutedImages(out) {
+  const found = [];
+  try {
+    if (!out || typeof out !== "object") return found;
+    for (const v of Object.values(out)) {
+      if (
+        Array.isArray(v) && v.length &&
+        v.every((r) => r && typeof r.filename === "string")
+      ) {
+        found.push(...v);
+      }
+    }
+  } catch (e) {
+    /* best-effort */
+  }
+  return found;
+}
+
+// Sampler id match, tolerant of subgraph instances: an inner node of a
+// subgraph sampler reports with a composite id (parent:inner).
+function matchesSampler(executedId, samplerId) {
+  const a = String(executedId);
+  const b = String(samplerId);
+  return a === b || a.startsWith(b + ":");
+}
 // Resolve the sampler node(s) feeding a Merge node whose job comes from
 // the given editor node: editor job output -> merge job input -> merge
 // rendered input source, chasing THROUGH bypassed nodes (bypass maps
@@ -705,6 +732,11 @@ const Editor = {
     this.renders = [];
     this.renderSel = -1;
     this.loadRenders(node);
+    try {
+      console.info("[OutpaintMask] linked samplers for editor:", JSON.stringify(findLinkedSamplers(node)));
+    } catch (e) {
+      /* ignore */
+    }
 
     this.ui.overlay.classList.remove("opm-hidden");
     this.openFlag = true;
@@ -2956,8 +2988,8 @@ try {
       const nid = detail && detail.node;
       if (nid == null) return;
       const out = detail.output || {};
-      const images = out.images;
-      if (!Array.isArray(images) || !images.length) return;
+      const images = collectExecutedImages(out);
+      if (!images.length) return;
       const runId = (detail && detail.prompt_id) || Date.now();
       const nodes = app.graph._nodes || [];
       for (const n of nodes) {
@@ -2968,8 +3000,9 @@ try {
         } catch (e) {
           /* ignore */
         }
-        if (!samplers.includes(nid)) continue;
+        if (!samplers.some((sid) => matchesSampler(nid, sid))) continue;
         n._opm_lastSampler = { runId, images };
+        console.info(`[OutpaintMask] adopted ${images.length} image(s) from node ${nid} for editor ${n.id}`);
         if (Editor.openFlag && Editor.node === n) {
           Editor.adoptSamplerRefs(images, runId, true);
         }
