@@ -86,12 +86,22 @@ pick/drop from `job`, and blends only the outpaint part.
 
 ## Single-graph feedback loop (lazy `rendered` input)
 
-Alternatively, wire the sampler output back into the **same** editor
-node's `rendered` input. That input is lazy (same pattern as
-InpaintCanvas `result`/`result_local`), so the loop is allowed: the node
-first runs the crops, then re-runs merged once the sampler output
-resolves. The gallery, Final thumb and `merged` output then all work in
-one graph with no second node.
+The `rendered` input is declared lazy (same pattern as InpaintCanvas
+`result`/`result_local`), so a future or custom frontend that permits it
+can wire the sampler output back into the same node. Note: **stock
+ComfyUI rejects structural cycles at validation time** (verified in
+`validate_inputs`: the cycle check has no lazy exemption), so with the
+standard frontend a loop wire still fails — use one of the two patterns
+below instead.
+
+## Working patterns
+
+1. **Two-node flow (recommended):** editor → sampler → **Outpaint
+   Merge** node (linear, never circular). Wiring: see above.
+2. **Two editor instances:** duplicate the editor node; the copy keeps the
+   same frame (clone carries the state). Wire the sampler output into the
+   *copy's* `rendered` input — the copy never feeds the sampler, so there
+   is no cycle. Gallery, Final thumb and `merged` then live on the copy.
 
 ## Render variants gallery
 

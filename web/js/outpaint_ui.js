@@ -3,7 +3,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-const VERSION = "1.18.0";
+const VERSION = "1.18.1";
 const NODE_NAME = "OutpaintMaskEditor";
 const SNAP = 8;                  // frame dims snap to multiples of this
 const EDGE_SNAP_PX = 10;         // screen-px tolerance for snapping to image edges

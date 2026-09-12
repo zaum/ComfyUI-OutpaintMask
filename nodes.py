@@ -217,11 +217,13 @@ class OutpaintMaskEditor:
             },
             # optional IMAGE input: when another node's output is connected
             # here, it overrides the dropdown-selected image.
-            # rendered is LAZY: the sampler output may be wired back into
-            # the same node without a circular-connection error (same
-            # pattern as InpaintCanvas result/result_local). The node first
-            # runs without it (crops + gallery refs), then re-runs merged
-            # once the sampler output resolves.
+            # rendered is LAZY (same pattern as InpaintCanvas
+            # result/result_local): reserved so a feedback wire does not
+            # break execution order IF some frontend ever permits it. Note:
+            # stock ComfyUI rejects structural cycles at validation time
+            # (no lazy exemption there), so wire sampler output either into
+            # a separate OutpaintMerge node or into a duplicated editor
+            # node - never back into the same instance.
             "optional": {
                 "image_opt": ("IMAGE",),
                 "rendered": ("IMAGE", {"lazy": True}),
