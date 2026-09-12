@@ -3,7 +3,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-const VERSION = "1.17.0";
+const VERSION = "1.17.1";
 const NODE_NAME = "OutpaintMaskEditor";
 const SNAP = 8;                  // frame dims snap to multiples of this
 const EDGE_SNAP_PX = 10;         // screen-px tolerance for snapping to image edges
@@ -2760,10 +2760,17 @@ api.addEventListener("executed", ({ detail }) => {
     // the gallery can compute the drop list). A run while the editor is open
     // refreshes the gallery live.
     if (Array.isArray(out.renders)) node._opm_renders = out.renders;
-    if (typeof out.render_n === "number") node._opm_render_n = out.render_n;
+    // NOTE: the core merges ui dicts by iterating every value, so scalars
+    // arrive wrapped in single-item lists - unwrap them (never index blindly).
+    const rn = Array.isArray(out.render_n) ? out.render_n[0] : out.render_n;
+    if (typeof rn === "number") node._opm_render_n = rn;
     // Final composite (backend merge result) for the gallery "Final" thumb.
-    if (out.merged_ref && out.merged_ref.filename) node._opm_merged = out.merged_ref;
-    else node._opm_merged = null;
+    const mlist = Array.isArray(out.merged_ref)
+      ? out.merged_ref
+      : out.merged_ref
+        ? [out.merged_ref]
+        : [];
+    node._opm_merged = mlist.find((r) => r && r.filename) || null;
     if (Editor.openFlag && Editor.node === node) {
       try {
         Editor.loadRenders(node);
@@ -2779,8 +2786,9 @@ api.addEventListener("executed", ({ detail }) => {
     } catch (e) {
       /* ignore */
     }
-    // The state may arrive as a string or (through some serializers) as a
-    // list of characters - normalize both to a string.
+    // The state arrives as a single-item list (the core splits ui strings
+    // per character when merging, and it may also arrive as a plain string
+    // or a character list) - normalize all shapes back to a string.
     let stateRaw = out.state;
     if (Array.isArray(stateRaw)) stateRaw = stateRaw.join("");
     if (typeof stateRaw === "string") {

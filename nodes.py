@@ -338,12 +338,16 @@ class OutpaintMaskEditor:
                     render_n = 0
             except Exception:
                 render_n = 0
+            # NOTE: every ui value MUST be a list: the core merges ui dicts
+            # with {k: [y for x in uis for y in x[k]]}, so a bare int
+            # crashes ("'int' object is not iterable") and a bare string is
+            # split into characters (the frontend joins it back).
             ui = {
                 "images": [prev_ref] if prev_ref else [],
                 "source": [src_ref],
-                "state": json.dumps(state),
+                "state": [json.dumps(state)],
                 "renders": render_refs,
-                "render_n": render_n,
+                "render_n": [render_n],
             }
             pct = float((out_mask > 0.5).mean()) * 100.0
             # Full merge canvas: the WHOLE source plus the positive outpaint
@@ -385,7 +389,7 @@ class OutpaintMaskEditor:
                 except Exception as e:
                     print(f"[OutpaintMask] merged save failed: {e}")
                     merged_ref = None
-            ui["merged_ref"] = merged_ref
+            ui["merged_ref"] = [merged_ref] if merged_ref else []
             print(
                 f"[OutpaintMask] canvas {cw}x{ch} image {w}x{h} "
                 f"pads l={l} t={t} r={r} b={b} mask={pct:.1f}% "
