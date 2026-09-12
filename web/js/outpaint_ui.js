@@ -3,7 +3,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-const VERSION = "1.18.1";
+const VERSION = "1.18.2";
 const NODE_NAME = "OutpaintMaskEditor";
 const SNAP = 8;                  // frame dims snap to multiples of this
 const EDGE_SNAP_PX = 10;         // screen-px tolerance for snapping to image edges
@@ -132,7 +132,11 @@ const CSS = `
 .opm-viewport canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
 .opm-side{width:136px;flex:none;background:#161616;border-left:1px solid #2c2c2c;
   display:flex;flex-direction:column;min-height:0}
-.opm-side-title{padding:8px 10px 4px;color:#8a8a8a;font-size:12px;flex:none}
+.opm-side-title{padding:8px 10px 4px;color:#8a8a8a;font-size:12px;flex:none;
+  display:flex;align-items:center;justify-content:space-between}
+.opm-side-load{background:none;border:1px solid #3c3c3c;color:#999;border-radius:4px;
+  cursor:pointer;font-size:12px;line-height:18px;padding:0 7px}
+.opm-side-load:hover{color:#eee;background:#2a2a2a}
 .opm-render-list{flex:1;overflow-y:auto;padding:4px 8px 10px;display:flex;
   flex-direction:column;gap:10px}
 .opm-render-empty{color:#666;font-size:12px;padding:6px 2px;line-height:1.5}
@@ -257,6 +261,41 @@ function loadImageURL(url) {
   });
 }
 
+// Resolve the sampler node(s) feeding a Merge node whose job comes from
+// the given editor node: editor job output -> merge job input, then the
+// merge rendered input source. Pure graph reads (no links created), so the
+// editor can adopt sampler outputs without any circular connection.
+function findLinkedSamplers(editorNode) {
+  const found = [];
+  try {
+    if (!editorNode || !app.graph) return found;
+    const outs = editorNode.outputs || [];
+    const jobOut = outs.find((o) => o && o.name === "job");
+    const jobLinks = (jobOut && jobOut.links) || [];
+    const links = app.graph.links || {};
+    const ends = (id) => {
+      const l = links[id];
+      if (!l) return null;
+      if (Array.isArray(l)) return { fromId: l[1], toId: l[3] };
+      return { fromId: l.origin_id, toId: l.target_id };
+    };
+    for (const lid of jobLinks) {
+      const lk = ends(lid);
+      if (!lk) continue;
+      const merge = app.graph.getNodeById(lk.toId);
+      if (!merge) continue;
+      const mt = merge.comfyClass || merge.type;
+      if (mt !== "OutpaintMerge") continue;
+      const rins = (merge.inputs || []).find((i) => i && i.name === "rendered");
+      const rl = rins && rins.link != null ? ends(rins.link) : null;
+      if (rl && !found.includes(rl.fromId)) found.push(rl.fromId);
+    }
+  } catch (e) {
+    /* best-effort */
+  }
+  return found;
+}
+
 function showToast(msg) {
   const t = document.createElement("div");
   t.className = "opm-toast";
@@ -301,6 +340,10 @@ const Editor = {
   // img}) + selected index (-1 = none). Rebuilt on every editor open.
   renders: [],
   renderSel: -1,
+  // Merge-run tag of the session batch: a new sampler run replaces the
+  // session (indices always match the backend batch), a repeated event for
+  // the same run only tops it up.
+  renderRunId: null,
   // Final composite session: backend merged result ({url, img}) shown as
   // the gallery "Final" thumb; showFinal previews it on the workspace.
   renderFinal: null,
@@ -364,7 +407,7 @@ const Editor = {
       <div class="opm-mid">
         <div class="opm-viewport" id="opm-viewport"><canvas id="opm-canvas"></canvas></div>
         <div class="opm-side" id="opm-side">
-          <div class="opm-side-title">Renders</div>
+          <div class="opm-side-title"><span>Renders</span><button class="opm-side-load" id="opm-render-load" title="Load the last sampler output into the gallery">↻</button></div>
           <div class="opm-render-list" id="opm-render-list"></div>
         </div>
       </div>
@@ -404,6 +447,7 @@ const Editor = {
       infoImg: overlay.querySelector("#opm-info-img"),
       infoFrame: overlay.querySelector("#opm-info-frame"),
       renderList: overlay.querySelector("#opm-render-list"),
+      renderLoadBtn: overlay.querySelector("#opm-render-load"),
       progressWrap: overlay.querySelector("#opm-progress"),
       progressFill: overlay.querySelector("#opm-progress-fill"),
     };
@@ -515,6 +559,9 @@ const Editor = {
 
     ui.resetBtn.addEventListener("click", () => this.resetFrame());
     ui.renderBtn.addEventListener("click", () => queueRender(this.node));
+    if (ui.renderLoadBtn) {
+      ui.renderLoadBtn.addEventListener("click", () => this.manualAdoptRenders());
+    }
     ui.cancelBtn.addEventListener("click", () => this.close());
     ui.okBtn.addEventListener("click", () => this.save());
 
@@ -1768,29 +1815,31 @@ const Editor = {
   // ------------------------------------------------------------ render gallery
 
   loadRenders(node) {
-    // Session copy of the sampler output batch (executed event refs):
-    // dropped batch indices stay hidden, selection restores the saved pick.
-    const refs = (node && node._opm_renders) || [];
+    // Session copy of the sampler output batch: the editor node's own
+    // executed refs first, otherwise the last sampler run adopted for it
+    // (adoptSamplerRefs). Dropped batch indices stay hidden, selection
+    // restores the saved pick.
+    let refs = (node && node._opm_renders) || [];
+    let runId = "own";
+    const cached = node && node._opm_lastSampler;
+    if ((!refs || !refs.length) && cached && Array.isArray(cached.images) && cached.images.length) {
+      refs = cached.images;
+      runId = cached.runId || "adopted";
+      if (node) node._opm_render_n = Math.max(node._opm_render_n || 0, refs.length);
+    }
     const st = this.getState(node);
     const drop = new Set(st.render_drop || []);
     this.renders = [];
+    this.renderRunId = runId;
     refs.forEach((ref, i) => {
       if (drop.has(i)) return;
       const url = buildViewURL(ref);
       if (!url) return;
-      this.renders.push({ batchIdx: i, url, img: null });
+      this.renders.push({ batchIdx: i, url, img: null, runId });
     });
     // Full-size images for the workspace paste-preview (thumbs use the URL
     // directly, the browser scales them).
-    this.renders.forEach((r) => {
-      loadImageURL(r.url)
-        .then((im) => {
-          if (this.openFlag) r.img = im;
-        })
-        .catch(() => {
-          /* thumb still shows; preview skips until loaded */
-        });
-    });
+    this._loadVariantImages();
     this.renderSel = this.renders.length
       ? Math.max(0, Math.min(st.render_pick || 0, this.renders.length - 1))
       : -1;
@@ -1811,6 +1860,70 @@ const Editor = {
         });
     }
     this.renderGallery();
+  },
+
+  _loadVariantImages() {
+    (this.renders || []).forEach((r) => {
+      if (r.img) return;
+      loadImageURL(r.url)
+        .then((im) => {
+          if (this.openFlag) r.img = im;
+        })
+        .catch(() => {
+          /* thumb still shows; preview skips until loaded */
+        });
+    });
+  },
+
+  // Adopt sampler output images into the gallery session (cycle-free: pure
+  // reads, no links). A fresh run batch replaces the session so indices
+  // always match the backend batch; a repeated event for the same run only
+  // tops up missing files. Returns true when the gallery changed.
+  adoptSamplerRefs(images, runId, notify) {
+    const refs = (images || []).filter((r) => r && r.filename);
+    if (!refs.length) return false;
+    if (this.renderRunId === runId && this.renders.length) {
+      let added = false;
+      refs.forEach((ref) => {
+        const url = buildViewURL(ref);
+        if (!url || this.renders.some((r) => r.url === url)) return;
+        const nextIdx = this.renders.reduce((m, r) => Math.max(m, r.batchIdx), -1) + 1;
+        this.renders.push({ batchIdx: nextIdx, url, img: null, runId });
+        added = true;
+      });
+      if (added) {
+        this._loadVariantImages();
+        this.renderGallery();
+        if (notify) showToast("Gallery updated with the latest renders.");
+      }
+      return added;
+    }
+    this.renders = [];
+    this.renderRunId = runId;
+    refs.forEach((ref, i) => {
+      const url = buildViewURL(ref);
+      if (url) this.renders.push({ batchIdx: i, url, img: null, runId });
+    });
+    if (!this.renders.length) return false;
+    this.renderFinal = null;
+    this.showFinal = false;
+    const st = this.getState(this.node);
+    this.renderSel = Math.max(0, Math.min(st.render_pick || 0, this.renders.length - 1));
+    if (this.node) this.node._opm_render_n = refs.length;
+    this._loadVariantImages();
+    this.renderGallery();
+    if (notify) showToast(`${this.renders.length} render variant(s) loaded into the gallery.`);
+    return true;
+  },
+
+  // Manual pull of the last seen sampler output (gallery header button).
+  manualAdoptRenders() {
+    const node = this.node;
+    const cached = node && node._opm_lastSampler;
+    if (cached && Array.isArray(cached.images) && cached.images.length) {
+      if (this.adoptSamplerRefs(cached.images, cached.runId, true)) return;
+    }
+    showToast("Queue first - no sampler output seen yet.");
   },
 
   renderGallery() {
@@ -2806,6 +2919,31 @@ api.addEventListener("executed", ({ detail }) => {
     /* ignore */
   }
 });
+
+// Sampler outputs adopted into the open editor gallery (cycle-free: the
+// editor reads the sampler's executed images, no links involved). The
+// sampler is resolved through the Merge node: editor job output -> merge
+// job input -> merge rendered input source. Best-effort throughout.
+try {
+  api.addEventListener("executed", ({ detail }) => {
+    try {
+      if (!Editor.openFlag || !Editor.node || !app.graph) return;
+      const nid = detail && detail.node;
+      if (nid == null) return;
+      if (!findLinkedSamplers(Editor.node).includes(nid)) return;
+      const out = detail.output || {};
+      const images = out.images;
+      if (!Array.isArray(images) || !images.length) return;
+      const runId = (detail && detail.prompt_id) || Date.now();
+      Editor.node._opm_lastSampler = { runId, images };
+      Editor.adoptSamplerRefs(images, runId, true);
+    } catch (e) {
+      /* best-effort */
+    }
+  });
+} catch (e) {
+  /* gallery adopt unavailable on old frontends */
+}
 
 // Queue progress strip: while the editor is open, sampler step events fill
 // the thin bar under the topbar; an idle queue (or editor close) hides it.

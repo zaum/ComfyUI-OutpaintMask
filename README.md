@@ -115,6 +115,10 @@ the editor's right-side strip lists every render variant as a thumbnail:
   outpaint part shows, originals stay intact; double-click accepts it,
 - hover a thumbnail for **✓** (green check: keep only this one and use
   it) and **✕** (red X: delete just this one),
+- the gallery fills itself: the editor resolves the sampler through the
+  Merge node (`job` link) and adopts its outputs on every run — no
+  circular wiring needed. The **↻** button in the strip header pulls the
+  last sampler output in manually.
 - OK writes the selection into the workflow (`render_pick` /
   `render_drop`); the backend merges that variant on the next run.
 - The finished composite comes back into the gallery as a green
