@@ -3,7 +3,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-const VERSION = "1.18.6";
+const VERSION = "1.18.7";
 const NODE_NAME = "OutpaintMaskEditor";
 const SNAP = 8;                  // frame dims snap to multiples of this
 const EDGE_SNAP_PX = 10;         // screen-px tolerance for snapping to image edges
@@ -137,11 +137,6 @@ const CSS = `
 .opm-side-load{background:none;border:1px solid #3c3c3c;color:#999;border-radius:4px;
   cursor:pointer;font-size:12px;line-height:18px;padding:0 7px}
 .opm-side-load:hover{color:#eee;background:#2a2a2a}
-.opm-recent-list{flex:none;display:flex;flex-direction:column;gap:4px;
-  padding:0 8px 6px;max-height:30%;overflow-y:auto}
-.opm-recent-item{background:#242424;border:1px solid #3c3c3c;color:#ccc;
-  border-radius:4px;cursor:pointer;font-size:11px;padding:3px 6px;text-align:left}
-.opm-recent-item:hover{background:#303030;color:#eee;border-color:#4a86e8}
 .opm-side-diag{flex:none;color:#666;font-size:10px;padding:2px 10px 8px;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .opm-render-list{flex:1;overflow-y:auto;padding:4px 8px 10px;display:flex;
@@ -155,11 +150,10 @@ const CSS = `
 .opm-thumb-tag{position:absolute;left:4px;top:4px;background:rgba(0,0,0,.65);color:#ddd;
   font-size:11px;padding:1px 6px;border-radius:4px;pointer-events:none}
 .opm-thumb-tag.final{background:rgba(31,122,51,.85);color:#fff}
-.opm-thumb-actions{position:absolute;right:calc(100% + 6px);top:50%;transform:translateY(-50%);
+.opm-thumb-actions{position:absolute;left:6px;top:50%;transform:translateY(-50%);
   display:none;flex-direction:column;gap:6px;z-index:5}
 .opm-thumb:hover .opm-thumb-actions,.opm-thumb:focus-within .opm-thumb-actions{display:flex}
-.opm-thumb-act{width:28px;height:28px;border-radius:50%;border:1px solid #555;
-  color:#fff;font-size:15px;line-height:1;cursor:pointer;display:flex;
+.opm-thumb-act{width:28px;height:28px;border-radius:50%;border:1px solid #555;  color:#fff;font-size:15px;line-height:1;cursor:pointer;display:flex;
   align-items:center;justify-content:center;padding:0}
 .opm-thumb-accept{background:#1f7a33;border-color:#2ea34d}
 .opm-thumb-accept:hover{background:#27a047}
@@ -295,15 +289,6 @@ function matchesSampler(executedId, samplerId) {
   const b = String(samplerId);
   return a === b || a.startsWith(b + ":");
 }
-// Recent executed image outputs (any node, ring buffer): the gallery can
-// adopt from these on click, so a render always reaches the editor even if
-// the automatic sampler match misses (odd ids, subgraph internals, ...).
-const recentExecuted = [];
-function pushRecentExecuted(nid, images, runId) {
-  recentExecuted.unshift({ nid, count: images.length, images, runId, at: Date.now() });
-  while (recentExecuted.length > 8) recentExecuted.pop();
-}
-
 // Resolve the sampler node(s) feeding a Merge node whose job comes from
 // the given editor node: editor job output -> merge job input -> merge
 // rendered input source, chasing THROUGH bypassed nodes (bypass maps
@@ -487,8 +472,6 @@ const Editor = {
         <div class="opm-side" id="opm-side">
           <div class="opm-side-title"><span>Renders</span><button class="opm-side-load" id="opm-render-load" title="Load the last sampler output into the gallery">↻</button></div>
           <div class="opm-render-list" id="opm-render-list"></div>
-          <div class="opm-side-title"><span>Recent outputs</span></div>
-          <div class="opm-recent-list" id="opm-recent-list"></div>
           <div class="opm-side-diag" id="opm-side-diag"></div>
         </div>
       </div>
@@ -529,7 +512,6 @@ const Editor = {
       infoFrame: overlay.querySelector("#opm-info-frame"),
       renderList: overlay.querySelector("#opm-render-list"),
       renderLoadBtn: overlay.querySelector("#opm-render-load"),
-      recentList: overlay.querySelector("#opm-recent-list"),
       sideDiag: overlay.querySelector("#opm-side-diag"),
       progressWrap: overlay.querySelector("#opm-progress"),
       progressFill: overlay.querySelector("#opm-progress-fill"),
@@ -2016,7 +1998,9 @@ const Editor = {
 
   renderGallery() {
     const ui = this.ui;
-    if (!ui || !ui.renderList) return;
+    if (!ui) return;
+    this.updateDiag();
+    if (!ui.renderList) return;
     const list = ui.renderList;
     list.innerHTML = "";
     if (!this.renders.length) {
@@ -2024,7 +2008,7 @@ const Editor = {
       d.className = "opm-render-empty";
       d.textContent = "No renders yet - press Render on the node, then open the editor.";
       list.appendChild(d);
-      this.renderRecent();
+      this.updateDiag();
       return;
     }
     this.renders.forEach((r, i) => {
@@ -2099,40 +2083,22 @@ const Editor = {
       });
       list.appendChild(t);
     }
-    this.renderRecent();
+    this.updateDiag();
   },
 
-  // Recent executed image outputs (any node): click one to load it into the
-  // gallery session. Guaranteed manual path when the automatic sampler
-  // match misses. Plus a one-line diagnostic (linked samplers + last run).
-  renderRecent() {
+  // One-line diagnostic: which sampler node the gallery listens to.
+  updateDiag() {
     const ui = this.ui;
-    if (!ui) return;
-    if (ui.recentList) {
-      ui.recentList.innerHTML = "";
-      recentExecuted.forEach((ev) => {
-        const b = document.createElement("button");
-        b.className = "opm-recent-item";
-        b.textContent = `${ev.nid} · ${ev.count} img`;
-        b.title = `Load ${ev.count} image(s) from node ${ev.nid} into the gallery`;
-        b.addEventListener("click", () => {
-          this.adoptSamplerRefs(ev.images, ev.runId, true);
-        });
-        ui.recentList.appendChild(b);
-      });
+    if (!ui || !ui.sideDiag) return;
+    let samps = [];
+    try {
+      samps = findLinkedSamplers(this.node);
+    } catch (e) {
+      /* ignore */
     }
-    if (ui.sideDiag) {
-      let samps = [];
-      try {
-        samps = findLinkedSamplers(this.node);
-      } catch (e) {
-        /* ignore */
-      }
-      const last = recentExecuted.length ? recentExecuted[0] : null;
-      ui.sideDiag.textContent =
-        `link:${samps.length ? samps.join(",") : "-"} ` +
-        `recent:${last ? last.nid + "x" + last.count : "-"}`;
-    }
+    ui.sideDiag.textContent = samps.length
+      ? `sampler:${samps.join(",")}`
+      : "sampler:-";
   },
 
   acceptVariant(i) {
@@ -3059,7 +3025,6 @@ try {
       const images = collectExecutedImages(out);
       if (!images.length) return;
       const runId = (detail && detail.prompt_id) || Date.now();
-      pushRecentExecuted(nid, images, runId);
       const nodes = app.graph._nodes || [];
       for (const n of nodes) {
         if (!n || (n.comfyClass !== NODE_NAME && n.type !== NODE_NAME)) continue;
@@ -3074,13 +3039,6 @@ try {
         console.info(`[OutpaintMask] adopted ${images.length} image(s) from node ${nid} for editor ${n.id}`);
         if (Editor.openFlag && Editor.node === n) {
           Editor.adoptSamplerRefs(images, runId, true);
-        }
-      }
-      if (Editor.openFlag) {
-        try {
-          Editor.renderRecent();
-        } catch (e) {
-          /* ignore */
         }
       }
     } catch (e) {
