@@ -3,7 +3,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-const VERSION = "1.14.2";
+const VERSION = "1.14.5";
 const NODE_NAME = "OutpaintMaskEditor";
 const SNAP = 8;                  // frame dims snap to multiples of this
 const EDGE_SNAP_PX = 10;         // screen-px tolerance for snapping to image edges
@@ -503,6 +503,18 @@ const Editor = {
       showToast("Editor failed to open (UI error - see console).");
       return;
     }
+    // A changed dropdown image invalidates the cached source ref and the
+    // old frame pads (they describe the previous picture). Reset BEFORE
+    // loading the source, or the editor opens the stale image.
+    try {
+      const iw = (node.widgets || []).find((x) => x && x.name === "image");
+      const iv = (iw && typeof iw.value === "string") ? iw.value : null;
+      if (iv && node._opm_imageVal !== undefined && iv !== node._opm_imageVal) {
+        opmResetForNewImage(node);
+        opmRefreshNodePreviewForImage(node, iv);
+      }
+      if (iv) node._opm_imageVal = iv;
+    } catch (e) { }
     let img = null;
     try {
       img = await this.getSource(node);
@@ -584,9 +596,17 @@ const Editor = {
   },
 
   setState(node, st) {
+    // The queue/serialized prompt reads node.widgets_values (NOT the live
+    // widget object), so both must be updated together - otherwise the
+    // backend keeps receiving the previous frame's pads and the output
+    // size does not match the editor.
     node._opm_state = JSON.stringify(st);
     const w = (node.widgets || []).find((x) => x.name === "outpaint_state");
-    if (w) w.value = node._opm_state;
+    if (w) {
+      w.value = node._opm_state;
+      const idx = (node.widgets || []).indexOf(w);
+      if (idx >= 0 && node.widgets_values) node.widgets_values[idx] = node._opm_state;
+    }
   },
 
   async getSource(node) {
@@ -1597,6 +1617,13 @@ const Editor = {
 
   save() {
     const f = this.frame;
+    // Drags leave fractional coords behind; snap to whole pixels first so
+    // the gap labels, the status bar and the pads sent to the backend all
+    // describe the exact same frame.
+    f.x = Math.round(f.x);
+    f.y = Math.round(f.y);
+    f.w = Math.round(f.w);
+    f.h = Math.round(f.h);
     const st = {
       v: 1,
       // Pads may be negative (crop); the frame always touches or overlaps
@@ -1856,10 +1883,10 @@ function opmApplyNewImageToNode(node, value) {
     /* ignore */
   }
   // A new image invalidates the cached source ref (else the editor would
-  // open the previous picture); the frame itself is kept.
+  // open the previous picture) and resets the mask frame to the new image.
+  opmResetForNewImage(node);
   try {
-    node._opm_source = null;
-    node._opm_preview = null;
+    node._opm_imageVal = value;
   } catch (e) {
     /* ignore */
   }
@@ -1868,6 +1895,83 @@ function opmApplyNewImageToNode(node, value) {
     if (app.graph && app.graph.change) app.graph.change();
   } catch (e) {
     /* ignore */
+  }
+}
+
+function opmResetForNewImage(node) {
+  // New source image: the old frame paddings describe the OLD picture,
+  // so they must not survive. Keep display prefs (mp/unit/dpi) and write
+  // back a zero-pad state, so the next editor open restores a reset frame
+  // that exactly matches the new image.
+  try {
+    const w = (node.widgets || []).find((x) => x && x.name === "outpaint_state");
+    let st = null;
+    try { st = parseState(w ? w.value : (node._opm_state || "{}")); } catch (e) { st = null; }
+    const keep = st && typeof st === "object" ? st : {};
+    const next = {
+      v: 1, l: 0, t: 0, r: 0, b: 0,
+      mp_on: keep.mp_on !== false,
+      mp: Number.isFinite(Number(keep.mp)) ? keep.mp : DEFAULT_MP,
+      unit: keep.unit === "mm" ? "mm" : "px",
+      dpi: Number.isFinite(Number(keep.dpi)) ? keep.dpi : DEFAULT_DPI,
+    };
+    const raw = JSON.stringify(next);
+    node._opm_state = raw;
+    if (w) {
+      w.value = raw;
+      const idx = (node.widgets || []).indexOf(w);
+      if (idx >= 0 && node.widgets_values) node.widgets_values[idx] = raw;
+    }
+    node._opm_source = null;
+    node._opm_preview = null;
+  } catch (e) { /* never break image switching over state reset */ }
+}
+
+function watchImageWidget(node) {
+  // Manual image change (dropdown select or the built-in upload button):
+  // reset the mask frame to the new image and refresh the node preview
+  // at once. The widget callback fires synchronously on user selection;
+  // the self-heal tick below is the safety net for paths that bypass it.
+  try {
+    const w = (node.widgets || []).find((x) => x && x.name === "image");
+    if (!w || w._opm_imgWatched) return;
+    w._opm_imgWatched = true;
+    node._opm_imageVal = (typeof w.value === "string") ? w.value : null;
+    const prev = w.callback;
+    w.callback = function (v) {
+      try {
+        if (typeof prev === "function") prev.apply(this, arguments);
+      } catch (e) { /* ignore */ }
+      try {
+        const cur = (typeof v === "string") ? v : (w ? w.value : null);
+        if (typeof cur === "string" && cur && cur !== node._opm_imageVal) {
+          node._opm_imageVal = cur;
+          opmResetForNewImage(node);
+          opmRefreshNodePreviewForImage(node, cur);
+          try { if (app.graph && app.graph.change) app.graph.change(); } catch (e) {}
+        }
+      } catch (e) { /* ignore */ }
+    };
+  } catch (e) { /* ignore */ }
+}
+
+async function opmRefreshNodePreviewForImage(node, value) {
+  // Show the newly selected image on the node preview at once (no queue
+  // needed): Nodes 1 swaps node.imgs[0], Nodes 2 swaps the DOM preview img.
+  if (!node || !value) return;
+  opmShowPastedPreview(node, value);
+  if (isLegacy()) {
+    try {
+      const seg = String(value).split("/");
+      const fname = seg.pop();
+      const sub = seg.join("/");
+      const url = buildViewURL({ filename: fname, subfolder: sub, type: "input" }, true);
+      const img = await loadImageURL(url);
+      if (!img) return;
+      node.imgs = [img];
+      if (typeof node.setSizeForImage === "function") node.setSizeForImage();
+      node.setDirtyCanvas(true, false);
+    } catch (e) { /* preview refresh is best-effort */ }
   }
 }
 
@@ -2147,6 +2251,19 @@ setInterval(() => {
         keepOpenButtonBelowPreview(n);
         ensurePreviewPasteButton(n);
       }
+      // Safety net for image swaps that bypass the widget callback:
+      // reset the mask frame to the new image and refresh the preview.
+      try {
+        const iw = (n.widgets || []).find((x) => x && x.name === "image");
+        const iv = (iw && typeof iw.value === "string") ? iw.value : null;
+        if (iv && n._opm_imageVal !== undefined && iv !== n._opm_imageVal) {
+          n._opm_imageVal = iv;
+          opmResetForNewImage(n);
+          opmRefreshNodePreviewForImage(n, iv);
+        } else if (iv && n._opm_imageVal === undefined) {
+          n._opm_imageVal = iv;
+        }
+      } catch (e) { /* ignore */ }
     }
   } catch (e) {
     /* ignore */
@@ -2372,6 +2489,8 @@ function setupNode(node) {
     // Right-click "Paste Image" through our upload path (also refreshes the
     // preview instantly and drops the stale mask composite).
     installOpmPaste(node);
+    // Track manual image swaps (dropdown/upload): reset the mask frame.
+    watchImageWidget(node);
     // Right-click menu entry.
     const origMenu = node.getExtraMenuOptions;
     node.getExtraMenuOptions = function (canvas, menu) {

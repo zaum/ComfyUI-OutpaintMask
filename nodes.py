@@ -17,7 +17,6 @@ import folder_paths
 SIZE_SNAP = 8
 PREVIEW_DIR_NAME = "outpaint_mask"
 PREVIEW_KEEP = 50
-MAX_PREVIEW_SIDE = 1024
 MAX_PAD = 16384               # absolute clamp for frame pads (negative pad = crop)
 
 
@@ -325,7 +324,9 @@ class OutpaintMaskEditor:
 
     def _save_preview(self, src, cw, ch, l, t, w, h):
         """Compose the node preview: original image on a checkerboard canvas
-        (outpaint area), thin frame border, no burned-in labels."""
+        (outpaint area), thin frame border, no burned-in labels. Saved at
+        full canvas resolution so the node preview size label matches the
+        actual output size."""
         save_name = None
         try:
             ts = 16
@@ -336,11 +337,6 @@ class OutpaintMaskEditor:
                     base.paste(tile, (x, y))
             base.paste(src.convert("RGB"), (l, t))
 
-            if max(cw, ch) > MAX_PREVIEW_SIDE:
-                sc = MAX_PREVIEW_SIDE / float(max(cw, ch))
-                base = base.resize(
-                    (max(8, int(cw * sc)), max(8, int(ch * sc))), Image.BILINEAR
-                )
             buf = io.BytesIO()
             base.save(buf, format="PNG", compress_level=1)
             data = buf.getvalue()
