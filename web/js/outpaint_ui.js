@@ -3,7 +3,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-const VERSION = "1.18.10";
+const VERSION = "1.19.2";
 const NODE_NAME = "OutpaintMaskEditor";
 const SNAP = 8;                  // frame dims snap to multiples of this
 const EDGE_SNAP_PX = 10;         // screen-px tolerance for snapping to image edges
@@ -88,6 +88,8 @@ const CSS = `
 .opm-progress{height:3px;flex:none;background:#101010}
 .opm-progress-fill{height:100%;width:0;background:linear-gradient(90deg,#2f6fed,#6ea8fe);
   transition:width .15s ease-out}
+.opm-side-render{flex:none;padding:8px 8px 6px;border-bottom:1px solid #2c2c2c;display:flex}
+.opm-side-render .opm-btn{flex:1}
 .opm-progress-fill.busy{width:100% !important;background:repeating-linear-gradient(90deg,
   #2f6fed 0 8px,#2456c4 8px 16px);animation:opm-slide 1s linear infinite;transition:none}
 @keyframes opm-slide{to{background-position:16px 0}}
@@ -132,8 +134,8 @@ const CSS = `
 .opm-viewport canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
 .opm-side{width:136px;flex:none;background:#161616;border-left:1px solid #2c2c2c;
   display:flex;flex-direction:column;min-height:0}
-.opm-side-title{padding:8px 10px 4px;color:#8a8a8a;font-size:12px;flex:none;
-  display:flex;align-items:center;justify-content:space-between}
+.opm-side-title{padding:2px 8px 4px;flex:none;
+  display:flex;align-items:center;justify-content:flex-end}
 .opm-side-load{background:none;border:1px solid #3c3c3c;color:#999;border-radius:4px;
   cursor:pointer;font-size:12px;line-height:18px;padding:0 7px}
 .opm-side-load:hover{color:#eee;background:#2a2a2a}
@@ -400,6 +402,14 @@ const Editor = {
   // the gallery "Final" thumb; showFinal previews it on the workspace.
   renderFinal: null,
   showFinal: false,
+  // True while a queue is running: the mask rectangle pulses and the
+  // corner resize handles stay hidden (border-only pulse). Cleared when
+  // the merged image lands or the queue goes idle.
+  rendering: false,
+  // True while a pasted render variant (or the Final composite) covers
+  // the workspace: the editing frame stays hidden until the next pointer
+  // press or drag.
+  pastedView: false,
   // One-shot cap flash: timestamp until which the frame shows solid amber.
   capFlashUntil: 0,
   _wasAtCap: false,
@@ -452,14 +462,14 @@ const Editor = {
         <div class="opm-group">
           <button class="opm-btn wide" id="opm-cancel" title="Discard changes (Esc)">Cancel</button>
           <button class="opm-btn primary wide" id="opm-ok" title="Apply mask (Enter)">OK</button>
-          <button class="opm-btn primary wide" id="opm-render" title="Queue the current workflow (renders the tile into the gallery)">Render</button>
         </div>
       </div>
       <div class="opm-progress opm-hidden" id="opm-progress"><div class="opm-progress-fill" id="opm-progress-fill"></div></div>
       <div class="opm-mid">
         <div class="opm-viewport" id="opm-viewport"><canvas id="opm-canvas"></canvas></div>
         <div class="opm-side" id="opm-side">
-          <div class="opm-side-title"><span>Renders</span><button class="opm-side-load" id="opm-render-load" title="Load the last merge variants into the gallery">↻</button></div>
+          <div class="opm-side-render"><button class="opm-btn primary wide" id="opm-render" title="Queue the current workflow (renders the tile into the gallery)">Render</button></div>
+          <div class="opm-side-title"><button class="opm-side-load" id="opm-render-load" title="Load the last merge variants into the gallery">↻</button></div>
           <div class="opm-render-list" id="opm-render-list"></div>
           <div class="opm-side-diag" id="opm-side-diag"></div>
         </div>
@@ -510,7 +520,10 @@ const Editor = {
 
   showProgressBusy() {
     // Thin indeterminate strip: a queue is running, no step numbers yet.
+    // Also starts the mask-rectangle pulse (border only, no handles).
     const ui = this.ui;
+    this.rendering = true;
+    this.pastedView = false;
     if (!ui || !ui.progressWrap || !ui.progressFill) return;
     ui.progressWrap.classList.remove("opm-hidden");
     ui.progressFill.classList.add("busy");
@@ -519,6 +532,8 @@ const Editor = {
   setProgress(value, max) {
     const ui = this.ui;
     if (!ui || !ui.progressWrap || !ui.progressFill) return;
+    this.rendering = true;
+    this.pastedView = false;
     ui.progressWrap.classList.remove("opm-hidden");
     ui.progressFill.classList.remove("busy");
     const v = Number(value);
@@ -530,7 +545,9 @@ const Editor = {
   },
 
   hideProgress() {
+    // Queue idle (or editor close): stop the mask-rectangle pulse.
     const ui = this.ui;
+    this.rendering = false;
     if (!ui || !ui.progressWrap || !ui.progressFill) return;
     ui.progressWrap.classList.add("opm-hidden");
     ui.progressFill.classList.remove("busy");
@@ -707,6 +724,15 @@ const Editor = {
     this.img = img;
     this.W = img.naturalWidth;
     this.H = img.naturalHeight;
+    try {
+      const iw = (node.widgets || []).find((x) => x && x.name === "image");
+      const iv = (iw && typeof iw.value === "string") ? iw.value : null;
+      if (iv && node._opm_imageVal !== undefined && iv !== node._opm_imageVal) {
+        opmResetForNewImage(node);
+        opmRefreshNodePreviewForImage(node, iv);
+      }
+      if (iv) node._opm_imageVal = iv;
+    } catch (e) { }
 
     const st = this.getState(node);
     this.mpOn = st.mp_on;
@@ -788,7 +814,13 @@ const Editor = {
   },
 
   getState(node) {
-    let raw = node._opm_state;
+    // The widget value is the source of truth: the queue, the serialized
+    // prompt and undo/redo all change it without touching our in-memory
+    // copy, so prefer it and only fall back to the cache.
+    let raw = null;
+    const w0 = (node.widgets || []).find((x) => x.name === "outpaint_state");
+    if (w0 && typeof w0.value === "string" && w0.value.trim()) raw = w0.value;
+    if (!raw) raw = node._opm_state;
     if (typeof raw !== "string" || !raw.trim()) {
       const w = (node.widgets || []).find((x) => x.name === "outpaint_state");
       raw = w ? w.value : "{}";
@@ -797,9 +829,24 @@ const Editor = {
   },
 
   setState(node, st) {
+    // The queue/serialized prompt reads node.widgets_values (NOT the live
+    // widget object), so both must be updated together - otherwise the
+    // backend keeps receiving the stale/empty state and returns no mask
+    // and no cropped size.
     node._opm_state = JSON.stringify(st);
     const w = (node.widgets || []).find((x) => x.name === "outpaint_state");
-    if (w) w.value = node._opm_state;
+    if (w) {
+      w.value = node._opm_state;
+      const idx = (node.widgets || []).indexOf(w);
+      if (idx >= 0 && node.widgets_values) node.widgets_values[idx] = node._opm_state;
+    }
+    // Saving syncs frame + image: remember both so a later image change is
+    // recognized as a genuine swap (and a workflow reload is not).
+    try {
+      const iw = (node.widgets || []).find((x) => x && x.name === "image");
+      if (iw && typeof iw.value === "string") node._opm_imageVal = iw.value;
+      node._opm_stateVal = node._opm_state;
+    } catch (e) { /* ignore */ }
   },
 
   async getSource(node) {
@@ -983,18 +1030,35 @@ const Editor = {
     // shows (original pixels stay intact).
     const fin = this.showFinal && this.renderFinal ? this.renderFinal.img : null;
     if (fin && fin.naturalWidth > 0 && !this.drag) {
-      const tx = Math.max(0, f.x);
-      const ty = Math.max(0, f.y);
-      ctx.drawImage(fin, X(f.x - tx), Y(f.y - ty), fin.naturalWidth * s, fin.naturalHeight * s);
+      // Full canvas origin in frame space: pads are (l,t)=(-f.x,-f.y), so
+      // the source sits at (l,t) inside the full canvas and the tile at
+      // (l-f.x, t-f.y). Drawing the full canvas there re-aligns both.
+      const ox = Math.min(0, Math.round(f.x));
+      const oy = Math.min(0, Math.round(f.y));
+      ctx.drawImage(fin, X(ox), Y(oy), fin.naturalWidth * s, fin.naturalHeight * s);
     } else if (!this.drag) {
       const vsel = this.renderSel;
       const vr = vsel >= 0 && vsel < this.renders.length ? this.renders[vsel] : null;
       if (vr && vr.img && vr.img.naturalWidth > 0) {
-        ctx.drawImage(vr.img, X(f.x), Y(f.y), f.w * s, f.h * s);
-        const ix0 = Math.max(0, f.x);
-        const iy0 = Math.max(0, f.y);
-        const ix1 = Math.min(this.W, f.x + f.w);
-        const iy1 = Math.min(this.H, f.y + f.h);
+        // Variant files hold the FULL tile-box content at backend size,
+        // so draw them at the snapped tile origin with their native size
+        // (no stretch, no crop): that re-aligns both the image part and
+        // the outpaint part in one step. The origin is snapped because
+        // the box itself is snapped.
+        // Same origin for the tile and the source overlap (snapped
+        // tile origin): otherwise the re-pasted source drifts off the
+        // variant image part by the snap delta.
+        const cw = ceilSnap(Math.max(8, Math.round(f.w)));
+        const ch = ceilSnap(Math.max(8, Math.round(f.h)));
+        const ox = Math.round(f.x / SNAP) * SNAP;
+        const oy = Math.round(f.y / SNAP) * SNAP;
+        const dw = Math.min(cw, vr.img.naturalWidth);
+        const dh = Math.min(ch, vr.img.naturalHeight);
+        ctx.drawImage(vr.img, 0, 0, dw, dh, X(ox), Y(oy), dw * s, dh * s);
+        const ix0 = Math.max(0, ox);
+        const iy0 = Math.max(0, oy);
+        const ix1 = Math.min(this.W, ox + dw);
+        const iy1 = Math.min(this.H, oy + dh);
         if (ix1 > ix0 && iy1 > iy0) {
           ctx.drawImage(
             this.img,
@@ -1005,19 +1069,27 @@ const Editor = {
       }
     }
 
-    // Frame border: a manual resize growing into the MP cap fires ONE short
-    // solid-amber flash (a single blink, never repeating). Otherwise thin
-    // blue, with snapped sides highlighted while the mouse button is held.
+    // Frame border: hidden while a rendered variant is pasted back (the
+    // image itself shows the result). While a queue runs it pulses (alpha
+    // oscillates, no corner handles). A manual resize growing into the MP
+    // cap fires ONE short solid-amber flash (a single blink). Otherwise
+    // thin blue, with snapped sides highlighted while held.
+    const hideFrame = this.pastedView && !this.drag;
     const flashing = performance.now() < this.capFlashUntil;
-    if (flashing) {
+    if (this.rendering && !hideFrame) {
+      const ph = (performance.now() / 500) % 2;
+      const pulse = ph < 1 ? 0.25 + 0.75 * ph : 1 - 0.75 * (ph - 1);
+      ctx.strokeStyle = `rgba(95, 155, 255, ${pulse.toFixed(3)})`;
+      ctx.lineWidth = FRAME_LINE;
+    } else if (flashing) {
       ctx.strokeStyle = "rgba(255, 176, 32, 0.95)";
       ctx.lineWidth = 2.5;
     } else {
       ctx.strokeStyle = "rgba(95, 155, 255, 0.95)";
       ctx.lineWidth = FRAME_LINE;
     }
-    ctx.strokeRect(X(f.x) - 0.5, Y(f.y) - 0.5, f.w * s + 1, f.h * s + 1);
-    if (!flashing && this.drag && this.drag.f0) {
+    if (!hideFrame) ctx.strokeRect(X(f.x) - 0.5, Y(f.y) - 0.5, f.w * s + 1, f.h * s + 1);
+    if (!hideFrame && !flashing && this.drag && this.drag.f0) {
       // Snapped sides glow strong blue while held: only sides that actually
       // moved during this drag and now sit on an image edge/center line.
       const tol = EDGE_SNAP_PX / this.scale;
@@ -1111,7 +1183,7 @@ const Editor = {
     const nearOutside = !!hv && !inside &&
       hv.ix > f.x - outer && hv.ix < f.x + f.w + outer &&
       hv.iy > f.y - outer && hv.iy < f.y + f.h + outer;
-    const showDims = resizing || deepInside || nearOutside;
+    const showDims = !this.rendering && (resizing || deepInside || nearOutside);
 
     // Gap labels with faint dotted guide lines: the line runs from the image
     // edge to the frame edge and is interrupted by the number in the middle
@@ -1178,6 +1250,9 @@ const Editor = {
       ctx.textBaseline = "alphabetic";
     }
 
+    // Handles: hidden while rendering (pulse is border-only) and while a
+    // rendered variant is pasted back.
+    if (this.rendering || hideFrame) return;
     // Handles: plain white squares WITHOUT an outline, drawn at a constant
     // screen size so they stay grabbable at any zoom level.
     const hs = HANDLE_DRAW;
@@ -1263,6 +1338,7 @@ const Editor = {
         break;
       }
     }
+    if (this.pastedView) this.pastedView = false;
     const f = this.frame;
     const inside =
       p.ix >= f.x && p.ix <= f.x + f.w && p.iy >= f.y && p.iy <= f.y + f.h;
@@ -1270,13 +1346,7 @@ const Editor = {
     // doing nothing, so the content can always be pulled back into view.
     // Middle mouse always pans, wherever the press happens.
     const wantPan = btn === 1;
-    if (!wantPan && (hit || inside)) {
-      if (this.renderSel !== -1 || this.showFinal) {
-        this.renderSel = -1;
-        this.showFinal = false;
-        this.renderGallery();
-      }
-    }
+    void hit; void inside; void wantPan;
     // Cap-flash edge tracking: fires only when a manual resize grows into
     // the limit (presets/sliders/typing never flash).
     this._prevArea = f.w * f.h;
@@ -1302,6 +1372,13 @@ const Editor = {
 
   onMove(e) {
     if (!this.openFlag) return;
+    // Active render: suppress hover feedback entirely (no readouts, no
+    // cursor changes) until the queue finishes.
+    if (this.rendering && !this.drag) {
+      this.hover = null;
+      this.ui.vp.style.cursor = "default";
+      return;
+    }
     const p = this.toImage(e);
     // Hover position drives the in-frame size readouts (gap labels + chip).
     this.hover = { ix: p.ix, iy: p.iy };
@@ -1902,13 +1979,17 @@ const Editor = {
     }
     const st = this.getState(node);
     const drop = new Set(st.render_drop || []);
-    this.renders = [];
+    // Every new render run appends its variants as NEW thumbnails: keep
+    // the existing ones and only add files not already listed.
+    if (!Array.isArray(this.renders)) this.renders = [];
     this.renderRunId = runId;
+    const have = new Set(this.renders.map((r) => r.url));
+    let nextIdx = this.renders.reduce((m, r) => Math.max(m, r.batchIdx), -1) + 1;
     refs.forEach((ref, i) => {
       if (drop.has(i)) return;
       const url = buildViewURL(ref);
-      if (!url) return;
-      this.renders.push({ batchIdx: i, url, img: null, runId });
+      if (!url || have.has(url)) return;
+      this.renders.push({ batchIdx: nextIdx++, url, img: null, runId });
     });
     // Full-size images for the workspace paste-preview (thumbs use the URL
     // directly, the browser scales them).
@@ -1949,9 +2030,9 @@ const Editor = {
   },
 
   // Adopt merge variant files into the gallery session (cycle-free: pure
-  // reads, no links). A fresh run batch replaces the session so indices
-  // always match the backend batch; a repeated event for the same run only
-  // tops up missing files. Returns true when the gallery changed.
+  // reads, no links). Every new run appends its variants as NEW thumbnails
+  // (the list only grows); a repeated event for the same run only tops up
+  // files still missing. Returns true when the gallery changed.
   adoptRenderRefs(images, runId, notify, mergedRef) {
     const refs = (images || []).filter((r) => r && r.filename);
     const mref = mergedRef || (this.node && this.node._opm_merged) || null;
@@ -1972,37 +2053,30 @@ const Editor = {
       }
     }
 
-    if (this.renderRunId === runId && this.renders.length) {
-      let added = false;
-      refs.forEach((ref) => {
-        const url = buildViewURL(ref);
-        if (!url || this.renders.some((r) => r.url === url)) return;
-        const nextIdx = this.renders.reduce((m, r) => Math.max(m, r.batchIdx), -1) + 1;
-        this.renders.push({ batchIdx: nextIdx, url, img: null, runId });
-        added = true;
-      });
-      if (added || mref) {
-        this._loadVariantImages();
-        this.renderGallery();
-        if (notify && added) showToast("Gallery updated with the latest renders.");
-      }
-      return added || Boolean(mref);
-    }
-    this.renders = [];
+    if (!Array.isArray(this.renders)) this.renders = [];
     this.renderRunId = runId;
-    refs.forEach((ref, i) => {
+    let added = false;
+    let nextIdx = this.renders.reduce((m, r) => Math.max(m, r.batchIdx), -1) + 1;
+    refs.forEach((ref) => {
       const url = buildViewURL(ref);
-      if (url) this.renders.push({ batchIdx: i, url, img: null, runId });
+      if (!url || this.renders.some((r) => r.url === url)) return;
+      this.renders.push({ batchIdx: nextIdx++, url, img: null, runId });
+      added = true;
     });
-    const st = this.getState(this.node);
-    this.renderSel = this.renders.length
-      ? Math.max(0, Math.min(st.render_pick || 0, this.renders.length - 1))
-      : -1;
-    if (this.node && refs.length) this.node._opm_render_n = refs.length;
+    if (this.node && refs.length) this.node._opm_render_n = Math.max(Number(this.node._opm_render_n || 0), nextIdx);
+    if (added) {
+      this.renderSel = this.renders.length - 1;
+      this.showFinal = false;
+      this.pastedView = true;
+      this.rendering = false;
+      try { this.hideProgress(); } catch (e) {}
+    } else if (this.renderSel < 0 && this.renders.length) this.renderSel = 0;
     this._loadVariantImages();
     this.renderGallery();
     if (notify) {
-      if (this.renders.length) {
+      if (added) {
+        showToast(`New render pasted back as thumbnail ${this.renders.length}.`);
+      } else if (this.renders.length) {
         showToast(`${this.renders.length} render variant(s) loaded into the gallery.`);
       } else if (mref) {
         showToast("Final render loaded into the gallery.");
@@ -2028,14 +2102,7 @@ const Editor = {
     if (!ui.renderList) return;
     const list = ui.renderList;
     list.innerHTML = "";
-    if (!this.renders.length) {
-      const d = document.createElement("div");
-      d.className = "opm-render-empty";
-      d.textContent = "No renders yet - press Render on the node, then open the editor.";
-      list.appendChild(d);
-      this.updateDiag();
-      return;
-    }
+    if (!this.renders.length) return; // empty column: no placeholder text
     this.renders.forEach((r, i) => {
       const t = document.createElement("div");
       t.className = "opm-thumb" + (i === this.renderSel ? " active" : "");
@@ -2072,6 +2139,8 @@ const Editor = {
       t.addEventListener("click", () => {
         this.renderSel = i;
         this.showFinal = false;
+        this.pastedView = true;
+        this.rendering = false;
         this.renderGallery();
       });
       t.addEventListener("dblclick", () => this.acceptVariant(i));
@@ -2079,6 +2148,8 @@ const Editor = {
         if (e.key === "Enter") {
           this.renderSel = i;
           this.showFinal = false;
+          this.pastedView = true;
+          this.rendering = false;
           this.renderGallery();
         }
       });
@@ -2327,6 +2398,50 @@ function opmIconPaste() {
   return '<i class="icon-[lucide--clipboard-paste] size-4" aria-hidden="true"></i>';
 }
 
+function opmResetForNewImage(node) {
+  // New source image: the old frame paddings describe the OLD picture,
+  // so they must not survive. Keep display prefs (mp/unit/dpi) and write
+  // back a zero-pad state, so the next editor open restores a reset frame
+  // that exactly matches the new image. Also drop stale render sessions.
+  try {
+    const w = (node.widgets || []).find((x) => x && x.name === "outpaint_state");
+    let st = null;
+    try { st = parseState(w ? w.value : (node._opm_state || "{}")); } catch (e) { st = null; }
+    const keep = st && typeof st === "object" ? st : {};
+    const next = {
+      v: 1, l: 0, t: 0, r: 0, b: 0,
+      mp_on: keep.mp_on !== false,
+      mp: Number.isFinite(Number(keep.mp)) ? keep.mp : DEFAULT_MP,
+      unit: keep.unit === "mm" ? "mm" : "px",
+      dpi: Number.isFinite(Number(keep.dpi)) ? keep.dpi : DEFAULT_DPI,
+      render_pick: 0, render_drop: [],
+    };
+    const raw = JSON.stringify(next);
+    node._opm_state = raw;
+    if (w) {
+      w.value = raw;
+      const idx = (node.widgets || []).indexOf(w);
+      if (idx >= 0 && node.widgets_values) node.widgets_values[idx] = raw;
+    }
+    node._opm_source = null;
+    node._opm_renders = [];
+    node._opm_render_n = 0;
+    node._opm_lastSampler = null;
+    node._opm_merged = null;
+    node._opm_preview = null;
+    // Open editor: drop the gallery session immediately, so stale render
+    // thumbs from the previous image never survive the switch.
+    if (Editor.openFlag && Editor.node === node) {
+      Editor.renders = [];
+      Editor.renderSel = -1;
+      Editor.renderRunId = null;
+      Editor.renderFinal = null;
+      Editor.showFinal = false;
+      Editor.renderGallery();
+    }
+  } catch (e) { /* never break image switching over state reset */ }
+}
+
 function opmApplyNewImageToNode(node, value) {
   const imgW = (node.widgets || []).find((x) => x && x.name === "image");
   const oldVal = imgW ? imgW.value : undefined;
@@ -2361,14 +2476,9 @@ function opmApplyNewImageToNode(node, value) {
     /* ignore */
   }
   // A new image invalidates the cached source ref (else the editor would
-  // open the previous picture); the frame itself is kept.
-  try {
-    node._opm_source = null;
-    node._opm_preview = null;
-  } catch (e) {
-    /* ignore */
-  }
-  opmShowPastedPreview(node, value);
+  // open the previous picture) and resets the mask frame to the new image.
+  opmResetForNewImage(node);
+  opmRefreshNodePreviewForImage(node, value);
   try {
     if (app.graph && app.graph.change) app.graph.change();
   } catch (e) {
@@ -2376,27 +2486,69 @@ function opmApplyNewImageToNode(node, value) {
   }
 }
 
-function opmShowPastedPreview(node, value) {
-  // Point the node preview at the newly pasted file right away (no queue
-  // needed) and drop the stale mask composite overlay covering it.
+async function opmRefreshNodePreviewForImage(node, value) {
+  // Show the newly selected/uploaded image on the node preview at once
+  // (no queue needed): Nodes 2 swaps the DOM preview img, Nodes 1 swaps
+  // node.imgs[0]. The stale mask composite overlay is dropped first.
+  if (!node || !value) return;
+  const seg = String(value).split("/");
+  const fname = seg.pop();
+  const sub = seg.join("/");
+  const url = api.apiURL("/view?" + new URLSearchParams({
+    filename: fname, subfolder: sub, type: "input",
+  }));
+  let img = null;
+  try { img = await loadImageURL(url); } catch (e) { return; }
+  if (!img) return;
   try {
+    if (isLegacy()) {
+      node.imgs = [img];
+      if (typeof node.setSizeForImage === "function") node.setSizeForImage();
+      node.setDirtyCanvas(true, false);
+      return;
+    }
     const cont = document.querySelector(`[data-node-id="${node.id}"]`);
     if (!cont) return;
     revealPreviewOriginals(cont);
     const preview = findPreviewImg(cont);
-    if (preview && preview.tagName === "IMG" && value) {
-      const seg = String(value).split("/");
-      const fname = seg.pop();
-      const sub = seg.join("/");
-      preview.src = api.apiURL("/view?" + new URLSearchParams({
-        filename: fname,
-        subfolder: sub,
-        type: "input",
-      }));
-    }
-  } catch (e) {
-    /* never break paste over cosmetics */
-  }
+    if (preview && preview.tagName === "IMG") preview.src = url;
+  } catch (e) { /* never break image switching over cosmetics */ }
+}
+
+function watchImageWidget(node) {
+  // Manual image change (dropdown select or the built-in upload button):
+  // reset the mask frame to the new image and refresh the node preview
+  // at once. The widget callback fires synchronously on user selection;
+  // the self-heal tick below is the safety net for paths that bypass it.
+  try {
+    const w = (node.widgets || []).find((x) => x && x.name === "image");
+    if (!w || w._opm_imgWatched) return;
+    w._opm_imgWatched = true;
+    node._opm_imageVal = (typeof w.value === "string") ? w.value : null;
+    try {
+      const sw = (node.widgets || []).find((x) => x && x.name === "outpaint_state");
+      node._opm_stateVal = (sw && typeof sw.value === "string") ? sw.value : node._opm_state;
+    } catch (e) { /* ignore */ }
+    const prev = w.callback;
+    w.callback = function (v) {
+      try {
+        if (typeof prev === "function") prev.apply(this, arguments);
+      } catch (e) { /* ignore */ }
+      try {
+        const cur = (typeof v === "string") ? v : (w ? w.value : null);
+        if (typeof cur === "string" && cur && cur !== node._opm_imageVal) {
+          node._opm_imageVal = cur;
+          try {
+            const sw = (node.widgets || []).find((x) => x && x.name === "outpaint_state");
+            node._opm_stateVal = (sw && typeof sw.value === "string") ? sw.value : node._opm_state;
+          } catch (e) { /* ignore */ }
+          opmResetForNewImage(node);
+          opmRefreshNodePreviewForImage(node, cur);
+          try { if (app.graph && app.graph.change) app.graph.change(); } catch (e) {}
+        }
+      } catch (e) { /* ignore */ }
+    };
+  } catch (e) { /* ignore */ }
 }
 
 async function opmHandlePastedFiles(node, files) {
@@ -2652,6 +2804,17 @@ setInterval(() => {
         keepOpenButtonBelowPreview(n);
         ensurePreviewPasteButton(n);
       }
+      try {
+        const iw = (n.widgets || []).find((x) => x && x.name === "image");
+        const iv = (iw && typeof iw.value === "string") ? iw.value : null;
+        if (iv && n._opm_imageVal !== undefined && iv !== n._opm_imageVal) {
+          n._opm_imageVal = iv;
+          opmResetForNewImage(n);
+          opmRefreshNodePreviewForImage(n, iv);
+        } else if (iv && n._opm_imageVal === undefined) {
+          n._opm_imageVal = iv;
+        }
+      } catch (e) { /* ignore */ }
     }
   } catch (e) {
     /* ignore */
@@ -2913,6 +3076,9 @@ function setupNode(node) {
     // Right-click "Paste Image" through our upload path (also refreshes the
     // preview instantly and drops the stale mask composite).
     installOpmPaste(node);
+    // Manual image change (dropdown select or upload button): reset the mask
+    // frame to the new image and refresh the node preview at once.
+    watchImageWidget(node);
     // Right-click menu entry.
     const origMenu = node.getExtraMenuOptions;
     node.getExtraMenuOptions = function (canvas, menu) {
@@ -2974,7 +3140,7 @@ api.addEventListener("executed", ({ detail }) => {
     node._opm_merged = mlist.find((r) => r && r.filename) || null;
     if (Editor.openFlag && Editor.node === node) {
       try {
-        Editor.loadRenders(node);
+        Editor.adoptRenderRefs(out.renders || [], (detail && detail.prompt_id) || "own", true, node._opm_merged);
       } catch (e) {
         /* gallery refresh is best-effort */
       }
