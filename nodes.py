@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import math
 import os
 import threading
 import time
@@ -225,13 +226,25 @@ class OutpaintMaskEditor:
 
             w, h = src.size
             l, t, r, b = state["l"], state["t"], state["r"], state["b"]
-            # Canvas size == frame selection size. When pads are negative the
-            # frame cuts INSIDE the image and the node output is cropped there;
-            # the canvas can then be smaller than the source image.
-            raw_cw = max(SIZE_SNAP, w + l + r)
-            raw_ch = max(SIZE_SNAP, h + t + b)
-            cw = _ceil_snap(raw_cw)
-            ch = _ceil_snap(raw_ch)
+            # Frame rect in image coords: top-left (fx, fy), raw size from
+            # the pads. The tile is the frame snapped OUTWARD to the 8 px
+            # VAE grid (floor origin, ceil far edge): only extra outpaint
+            # area is added, never extra crop. This keeps crop_x/crop_y on
+            # the 8 px grid so the tile and the full canvas composite
+            # without a 1-7 px shift on non-8-divisible images.
+            fx, fy = -l, -t
+            raw_w = max(SIZE_SNAP, w + l + r)
+            raw_h = max(SIZE_SNAP, h + t + b)
+            fxs = math.floor(fx / SIZE_SNAP) * SIZE_SNAP
+            fys = math.floor(fy / SIZE_SNAP) * SIZE_SNAP
+            fx1s = math.ceil((fx + raw_w) / SIZE_SNAP) * SIZE_SNAP
+            fy1s = math.ceil((fy + raw_h) / SIZE_SNAP) * SIZE_SNAP
+            cw = max(SIZE_SNAP, fx1s - fxs)
+            ch = max(SIZE_SNAP, fy1s - fys)
+            # Effective pads of the snapped frame (source sits at (l2, t2)
+            # on the tile).
+            l, t = -fxs, -fys
+            r, b = fx1s - w, fy1s - h
 
             arr = np.asarray(src, dtype=np.float32) / 255.0
             # Background of the outpaint area: mid-gray (128), not black.

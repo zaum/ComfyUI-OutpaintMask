@@ -2,6 +2,8 @@
 
 Custom ComfyUI node for creating **outpaint masks** interactively.
 
+# ![1789411723015](images/README/1789411723015.png)
+
 Select or upload an image on the node (or hover the preview and use the
 clipboard-paste icon, like on the FastMask node), then open the
 **fullscreen editor** (button below the node preview, preview click, or
@@ -63,21 +65,6 @@ The node outputs:
 - `original_image` — FULL canvas (whole source + outpaint expansion,
   nothing cropped away): the source on mid-gray.
 - `crop_x` / `crop_y` — top-left position of the tile on the full canvas.
-
-Merge with the core Image Composite Masked node: destination=
-`original_image`, source=rendered tile (upscale to tile size first if the
-sampler worked at a different resolution), x=`crop_x`, y=`crop_y`,
-mask=`cropped_mask`, resize_source off. Original pixels stay bit-identical.
-
-The node preview shows the original image on a neutral checkerboard
-canvas (outpaint area) with a thin frame border and no burned-in labels.
-On OK the preview is instantly replaced (aspect-correct) with the new
-canvas size; the next queue swaps in the backend-rendered image. The
-fixed-height editor button sits below the preview; the frame-state field
-is hidden (it still travels to the backend with the prompt).
-
-Compatible with both frontend generations (Nodes 1 / LiteGraph canvas and
-Nodes 2 / Vue).
 
 ## Install
 
