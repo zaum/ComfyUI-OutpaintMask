@@ -9,7 +9,7 @@ dependencies = []
 Repository = "https://github.com/zaum/ComfyUI-OutpaintMask"
 
 [tool.comfy]
-Publisher = ""
+PublisherId = "zaum"
 DisplayName = "Outpaint Mask Editor"
 Icon = "https://raw.githubusercontent.com/zaum/ComfyUI-OutpaintMask/main/img/icon.jpg"
 Banner = "https://raw.githubusercontent.com/zaum/ComfyUI-OutpaintMask/main/img/banner.jpg"
