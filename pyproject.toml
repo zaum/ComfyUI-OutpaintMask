@@ -11,4 +11,5 @@ Repository = "https://github.com/zaum/ComfyUI-OutpaintMask"
 [tool.comfy]
 Publisher = ""
 DisplayName = "Outpaint Mask Editor"
-Icon = "🖌"
+Icon = "https://raw.githubusercontent.com/zaum/ComfyUI-OutpaintMask/main/img/icon.jpg"
+Banner = "https://raw.githubusercontent.com/zaum/ComfyUI-OutpaintMask/main/img/banner.jpg"

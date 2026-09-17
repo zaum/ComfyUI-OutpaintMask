@@ -46,6 +46,15 @@ See the [Flux2 Klein sample workflow](examples/flux2_klein_outpaint.json)
 **Manager → Custom Nodes Manager**, search for **ComfyUI-OutpaintMask**
 (author: `zaum`), click **Install**, and restart ComfyUI.
 
+The [Manager listing request](https://github.com/Comfy-Org/ComfyUI-Manager/pull/3293)
+is awaiting approval. Search availability depends on approval and catalog refresh;
+there is no guaranteed publication time. Use manual installation until it appears.
+
+Screenshot-derived icon and banner assets are configured in `pyproject.toml`
+for Registry/Manager views that support them. The legacy Manager catalog has
+no thumbnail field; these assets require publication to the Registry to appear
+in Registry-backed views.
+
 
 Manual install: copy (or symlink) this folder into
 `ComfyUI/custom_nodes/ComfyUI-OutpaintMask` and restart ComfyUI. No extra
