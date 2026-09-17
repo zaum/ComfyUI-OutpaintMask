@@ -32,28 +32,17 @@ The node outputs:
 
 ## Compositing: Flux2 Klein example
 
-If we not only want to use outpainting but have also cropped a high-resolution image, we can reinsert the cropped section back into the original image. The basic method is use the Composite node.  
+If we not only want to use outpainting but have also cropped a high-resolution image, we can reinsert the cropped section back into the original image. The basic method is use the Composite node.
 
 See the [Flux2 Klein sample workflow](examples/flux2_klein_outpaint.json)
 
-
 # ![screenshot](img/screenshot2.jpg)
 
-
-##  Install
+## Install
 
 **Recommended:** install with the ComfyUI extension manager. Open
 **Manager → Custom Nodes Manager**, search for **ComfyUI-OutpaintMask**
 (author: `zaum`), click **Install**, and restart ComfyUI.
-
-The [Manager listing request](https://github.com/Comfy-Org/ComfyUI-Manager/pull/3293)
-is awaiting approval. Search availability depends on approval and catalog refresh;
-there is no guaranteed publication time. Use manual installation until it appears.
-
-Screenshot-derived icon and banner assets are configured in `pyproject.toml`
-for Registry/Manager views that support them. The legacy Manager catalog has
-no thumbnail field; these assets require publication to the Registry to appear
-in Registry-backed views.
 
 
 Manual install: copy (or symlink) this folder into
