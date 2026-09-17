@@ -1,8 +1,17 @@
 # ComfyUI Outpaint Mask — Changelog
 
-* **Total commits:** 7 (plus one uncommitted working-tree update)
+* **Total commits:** 9
 * **Date range:** 2026-09-12 – 2026-09-17
-* **Environment / Context:** Local development; Manager listing PR #3293 awaiting approval
+* **Environment / Context:** Published to the Comfy Registry as `comfyui-outpaintmask` 1.15.0; Manager listing PR #3293 still awaiting approval
+
+---
+
+### <sup><sub style="font-size: 0.7em;">2026-09-17</sub></sup> · 🚀 Features · Published to the Comfy Registry
+* Published version 1.15.0 to the Comfy Registry under publisher `zaum`; the node became active with the screenshot-derived icon and banner.
+* Set the registry `PublisherId` in package metadata and committed it.
+* The Manager listing request remains pending as a parallel, legacy-channel registration.
+
+`Direct Commit` · `a8c3eed`
 
 ---
 
@@ -11,7 +20,8 @@
 * Replaced the emoji icon with public-repository image URLs in the Icon and Banner package metadata.
 * Documented that Manager listing approval has no guaranteed timeline and Registry artwork requires separate publication.
 
-`Working Tree` · `Uncommitted`
+`Direct Commit` · `dd30b78`
+
 
 ---
 
