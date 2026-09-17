@@ -2,7 +2,17 @@
 
 * **Total commits:** 3 (plus one uncommitted working-tree update)
 * **Date range:** 2026-09-12 – 2026-09-17
-* **Environment / Context:** Local development; v1.14.8 alignment update pending commit
+* **Environment / Context:** Local development; v1.15.0 original_mask output pending commit
+
+---
+
+### <sup><sub style="font-size: 0.7em;">2026-09-17</sub></sup> · 🚀 Features · Added original_mask Full-Canvas Output
+* Added a new `original_mask` output right after `original_image`: same full-canvas size, 0.0 on the source, 1.0 on the outpaint area.
+* Updated the fallback path to return the new 6-output arity.
+* Extended the CPU-only geometry tests to cover the new mask.
+* Bumped the frontend and package version to 1.15.0.
+
+`Working Tree` · `Uncommitted`
 
 ---
 

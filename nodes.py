@@ -161,15 +161,17 @@ class OutpaintMaskEditor:
     # set by hand, it may cut into the source with negative pads).
     # cropped_image/cropped_mask go to the sampler. original_image is the
     # FULL canvas (whole source + positive outpaint expansion, nothing
-    # cropped away) with the source on mid-gray. crop_x/crop_y is the tile
-    # top-left on the full canvas; merge with the tile mask, e.g. via the
-    # core Image Composite Masked node:
+    # cropped away) with the source on mid-gray. original_mask is the same
+    # FULL canvas size: 0.0 where the source sits, 1.0 on the outpaint area.
+    # crop_x/crop_y is the tile top-left on the full canvas; merge with the
+    # tile mask, e.g. via the core Image Composite Masked node:
     # composite(original_image, rendered, crop_x, crop_y, cropped_mask).
-    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", "INT", "INT")
+    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", "MASK", "INT", "INT")
     RETURN_NAMES = (
         "cropped_image",
         "cropped_mask",
         "original_image",
+        "original_mask",
         "crop_x",
         "crop_y",
     )
@@ -182,10 +184,11 @@ class OutpaintMaskEditor:
         "define the outpaint area. The frame is the render tile (you set its "
         "size and context by hand, it may cut into the source). Outputs "
         "CROPPED_IMAGE + CROPPED_MASK for the sampler, ORIGINAL_IMAGE (full "
-        "canvas: whole source + outpaint, nothing cropped away), "
-        "CROP_X/CROP_Y (tile position). Merge e.g. with the core Image "
-        "Composite Masked node: destination=original_image, source=rendered "
-        "tile, x=crop_x, y=crop_y, mask=cropped_mask."
+        "canvas: whole source + outpaint, nothing cropped away) + "
+        "ORIGINAL_MASK (same full-canvas size: 0.0 on the source, 1.0 on "
+        "the outpaint area), CROP_X/CROP_Y (tile position). Merge e.g. with "
+        "the core Image Composite Masked node: destination=original_image, "
+        "source=rendered tile, x=crop_x, y=crop_y, mask=cropped_mask."
     )
 
     @classmethod
@@ -278,6 +281,11 @@ class OutpaintMaskEditor:
             fh = _ceil_snap(max(SIZE_SNAP, h + tp + bp, ty + ch))
             original_np = np.full((fh, fw, 3), 0.5, dtype=np.float32)
             original_np[tp : tp + h, lp : lp + w, :] = arr
+            # Full-canvas mask, same size as original_image: 0.0 where the
+            # source sits, 1.0 on the outpaint area (same convention as
+            # cropped_mask).
+            original_mask_np = np.ones((fh, fw), dtype=np.float32)
+            original_mask_np[tp : tp + h, lp : lp + w] = 0.0
             print(
                 f"[OutpaintMask] canvas {cw}x{ch} image {w}x{h} "
                 f"pads l={l} t={t} r={r} b={b} mask={pct:.1f}% "
@@ -289,6 +297,7 @@ class OutpaintMaskEditor:
                     torch.from_numpy(out_image)[None,],
                     torch.from_numpy(out_mask)[None,],
                     torch.from_numpy(original_np)[None,],
+                    torch.from_numpy(original_mask_np)[None,],
                     tx,
                     ty,
                 ),
@@ -394,10 +403,11 @@ class OutpaintMaskEditor:
         if out_image is None:
             out_image = torch.zeros((1, h, w, 3), dtype=torch.float32)
         out_mask = torch.zeros((1, h, w), dtype=torch.float32)
+        original_mask = torch.zeros((1, out_image.shape[1], out_image.shape[2]), dtype=torch.float32)
         # Result arity must always match RETURN_TYPES.
         return {
             "ui": {"images": ui_images},
-            "result": (out_image, out_mask, out_image, 0, 0),
+            "result": (out_image, out_mask, out_image, original_mask, 0, 0),
         }
 
     @classmethod

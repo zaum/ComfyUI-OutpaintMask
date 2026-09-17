@@ -35,8 +35,10 @@ class FrameAlignmentTests(unittest.TestCase):
         source = (torch.arange(h * w * 3).reshape(1, h, w, 3) % 256).float() / 255
         with contextlib.redirect_stdout(io.StringIO()):
             result = editor.load("", json.dumps(dict(zip("ltrb", pads))), source)["result"]
-        tile, mask, full, x, y = result
+        tile, mask, full, full_mask, x, y = result
         th, tw = tile.shape[1:3]
+        fh, fw = full.shape[1:3]
+        self.assertEqual(tuple(full_mask.shape), (1, fh, fw))
         self.assertEqual(tw % 16, 0)
         self.assertEqual(th % 16, 0)
         self.assertEqual(tuple(mask.shape), (1, th, tw))
@@ -55,6 +57,10 @@ class FrameAlignmentTests(unittest.TestCase):
         expected_mask = ~((ys[:, None] >= 0) & (ys[:, None] < h)
                           & (xs[None, :] >= 0) & (xs[None, :] < w))
         self.assertTrue(torch.equal(mask[0], expected_mask.float()))
+        # original_mask: same full-canvas size, 0.0 on the source, 1.0 elsewhere.
+        expected_full_mask = torch.ones((fh, fw))
+        expected_full_mask[tp:tp + h, lp:lp + w] = 0.0
+        self.assertTrue(torch.equal(full_mask[0], expected_full_mask))
         # Model the VAE's center-crop size calculation: neither axis may move.
         self.assertEqual(((tw % 16) // 2, (th % 16) // 2), (0, 0))
         return tile
