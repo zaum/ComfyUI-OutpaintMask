@@ -32,10 +32,10 @@ The node outputs:
 
 ## Compositing: Flux2 Klein example
 
-
+If we not only want to use outpainting but have also cropped a high-resolution image, we can reinsert the cropped section back into the original image. The basic method is use the Composite node.  
 
 See the [Flux2 Klein sample workflow](examples/flux2_klein_outpaint.json)
-The basic method is use the Composite node.  
+
 
 # ![screenshot](img/screenshot2.jpg)
 
