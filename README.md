@@ -2,58 +2,20 @@
 
 Custom ComfyUI node for creating **outpaint masks** interactively.
 
-# ![1789411723015](images/README/1789411723015.png)
+# ![screenshot](img/screenshot.jpg)
 
 Select or upload an image on the node (or hover the preview and use the
-clipboard-paste icon, like on the FastMask node), then open the
-**fullscreen editor** (button below the node preview, preview click, or
-right-click menu). Drag the frame around the image to define the
-outpaint area:
+clipboard-paste icon).
 
 - 8 draggable handles: corners resize proportionally by default (hold
-  Shift for free resize), edges resize in one direction, dragging the
-  middle moves the whole frame. Cropping into the image is allowed, but
-  the frame and the image must always touch or overlap: the frame can
-  never leave the picture fully. Frame sides snap exactly to the image
-  edges and center lines at any zoom (the snap decision uses the raw
-  pointer, never the 16 px grid), even for non-16-divisible image sizes; a snapped
-  side glows blue while held, and a dashed guide spans the image while
-  snapped to a center line. The aspect-ratio preset buttons are
-  ONE-SHOT size setters: they set the frame once and nothing keeps the
-  ratio afterwards.
+  Shift for free resize)
 - Snapping to the original image edges and to 16 px multiples.
 - Aspect-ratio preset buttons (1:1, 3:2, 2:3, 4:3, 3:4, 16:9, 9:16,
-  21:9, 9:21) shown as one segmented control. Each preset creates the
-  SMALLEST frame with that ratio that still contains the image: one side
-  of the frame equals the image's width or height. Presets resize around
-  the current mask center. The matching preset highlights automatically,
-  even when the frame was resized by dragging the handles.
-- Pixel/millimeter readout switch (px | mm) with a DPI field (default 300,
-  enabled in mm mode). In mm mode every size on screen (W/H inputs, gap
-  labels, frame chip, status bar) is shown in millimeters; the internal
-  model stays in pixels.
+  21:9, 9:21)
+- Pixel/millimeter readout switch (px | mm) with a DPI field.
 - Adjustable megapixel cap ("Limit megapixel" toggle + slider with
   typical values + narrow manual input) that the frame area cannot exceed.
-  Slider stops track native model sizes (0.26 = SD1.5 512^2, 0.59 = SD2.x
-  768^2, 1.05 = SDXL/SD3 1024^2) plus larger working sizes up to 8 MP.
-  While dragging (or hovering) the slider, a bubble shows the cap MP and
-  the live frame pixel size.
-  Cap changes shrink the frame around its center (position stays put).
-  Corner drags may overshoot the cap while held (no hard wall) and spring
-  back on release. Growing into the cap by hand fires one short amber
-  frame flash (never blinks continuously). Snapped frame sides glow blue
-  while the mouse button is held.
-- Editable frame W/H inputs: typing a size keeps the frame position
-  and only changes the size (snapped to 16 px); the spinner steps by 16 px
-  (or its mm equivalent). Live gap labels on every side and the frame
-  size chip next to the frame show only while the cursor is inside the
-  frame; the bottom info bar shows Image size → Output (canvas) size.
-- The view always fits the whole frame after a frame change, so the full
-  mask stays visible. Wheel: zoom (kept until the next frame change).
-  Middle-mouse drag or empty click: pan (panning never triggers the
-  auto-fit).
-- Cancel / OK in the top-right corner; Reset restores the image-size
-  frame (clamped to the megapixel cap when the limit is on).
+  Slider stops track native model sizes.
 
 The node outputs:
 
@@ -64,20 +26,27 @@ The node outputs:
   original, inside the frame), `0.0` over the original image.
 - `original_image` — FULL canvas (whole source + outpaint expansion,
   nothing cropped away): the source on mid-gray.
+- `original_mask` — full-canvas mask: `0.0` over the source and `1.0` in the outpaint area.
 - `crop_x` / `crop_y` — top-left position of the tile on the full canvas.
+  These outputs enable compositing the generated tile back into `original_image`.
 
-## Frame alignment
+## Compositing: Flux2 Klein example
 
-The render tile is snapped outward to a 16 px grid on save and in the
-backend. Both width and height are divisible by 16, preventing Flux2 VAE
-center-cropping of tiles that were previously only divisible by 8. The
-image, mask and merge coordinates use the same aligned frame. The source
-image is not resized or cropped; older saved frames may expand slightly.
-This also satisfies 8 px VAE alignment. Image-edge snapping remains exact
-while dragging; the output readout shows the final aligned dimensions.
-Outward alignment may add a small margin above the nominal megapixel cap.
 
-## Install
 
-Copy (or symlink) this folder into `ComfyUI/custom_nodes/ComfyUI-OutpaintMask`
-and restart ComfyUI. No extra Python dependencies beyond the ComfyUI core.
+See the [Flux2 Klein sample workflow](examples/flux2_klein_outpaint.json)
+The basic method is use the Composite node.  
+
+# ![screenshot](img/screenshot2.jpg)
+
+
+##  Install
+
+**Recommended:** install with the ComfyUI extension manager. Open
+**Manager → Custom Nodes Manager**, search for **ComfyUI-OutpaintMask**
+(author: `zaum`), click **Install**, and restart ComfyUI.
+
+
+Manual install: copy (or symlink) this folder into
+`ComfyUI/custom_nodes/ComfyUI-OutpaintMask` and restart ComfyUI. No extra
+Python dependencies beyond the ComfyUI core.

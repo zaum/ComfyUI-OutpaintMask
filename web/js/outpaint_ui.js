@@ -2357,7 +2357,7 @@ function makeOpenButtonEl(node) {
   wrap.className = "opm-open-wrap";
   const b = document.createElement("button");
   b.className = "opm-open-btn";
-  b.textContent = `Outpaint Editor v${VERSION}`;
+  b.textContent = "Outpaint Editor";
   b.addEventListener("click", (e) => {
     e.preventDefault();
     e.stopPropagation();

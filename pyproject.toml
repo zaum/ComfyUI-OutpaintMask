@@ -5,6 +5,9 @@ version = "1.15.0"
 license = { text = "MIT" }
 dependencies = []
 
+[project.urls]
+Repository = "https://github.com/zaum/ComfyUI-OutpaintMask"
+
 [tool.comfy]
 Publisher = ""
 DisplayName = "Outpaint Mask Editor"
