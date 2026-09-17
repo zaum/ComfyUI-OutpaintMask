@@ -3,9 +3,9 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-const VERSION = "1.14.7";
+const VERSION = "1.14.8";
 const NODE_NAME = "OutpaintMaskEditor";
-const SNAP = 8;                  // frame dims snap to multiples of this
+const SNAP = 16;                 // shared frame grid for Flux2 and 8 px VAEs
 const EDGE_SNAP_PX = 10;         // screen-px tolerance for snapping to image edges
 const HANDLE_PX = 18;            // handle hit tolerance (screen px)
 const HANDLE_DRAW = 5;           // handle half-size drawn on screen (px)
@@ -297,9 +297,9 @@ const Editor = {
         </div>
         <div class="opm-sep"></div>
         <div class="opm-group">
-          <span class="opm-label">W</span><input type="number" id="opm-w" class="opm-num" step="8" min="${MIN_DIM}">
+          <span class="opm-label">W</span><input type="number" id="opm-w" class="opm-num" step="${SNAP}" min="${MIN_DIM}">
           <span class="opm-label">×</span>
-          <span class="opm-label">H</span><input type="number" id="opm-h" class="opm-num" step="8" min="${MIN_DIM}">
+          <span class="opm-label">H</span><input type="number" id="opm-h" class="opm-num" step="${SNAP}" min="${MIN_DIM}">
           <div class="opm-pill-group">
             <button class="opm-pill" data-unit="px">px</button><button class="opm-pill" data-unit="mm">mm</button>
           </div>
@@ -638,8 +638,8 @@ const Editor = {
     const y0 = hasFrame ? Math.min(0, f.y) : 0;
     const x1 = hasFrame ? Math.max(this.W, f.x + f.w) : this.W;
     const y1 = hasFrame ? Math.max(this.H, f.y + f.h) : this.H;
-    const bw = Math.max(8, x1 - x0);
-    const bh = Math.max(8, y1 - y0);
+    const bw = Math.max(SNAP, x1 - x0);
+    const bh = Math.max(SNAP, y1 - y0);
     const fit = Math.min((vw * 0.88) / bw, (vh * 0.88) / bh);
     // Wheel-zoom limits stay anchored to the image fit (stable reference).
     this.fitScale = Math.min((vw * 0.88) / this.W, (vh * 0.88) / this.H);
@@ -674,27 +674,27 @@ const Editor = {
     const toField = (px) => (this.unit === "mm" ? (px * MM_PER_INCH / this.dpi).toFixed(1) : Math.round(px));
     if (document.activeElement !== ui.wIn || !ui.wIn._opmDirty) ui.wIn.value = toField(f.w);
     if (document.activeElement !== ui.hIn || !ui.hIn._opmDirty) ui.hIn.value = toField(f.h);
-    // Spinner steps stay on the 8 px grid (one VAE cell): 8 px in px mode,
-    // the 8 px equivalent in mm mode. Typed values snap on change anyway.
-    const mmStep = String(Math.max(0.01, Math.round(((8 * MM_PER_INCH) / this.dpi) * 100) / 100));
-    ui.wIn.step = this.unit === "mm" ? mmStep : "8";
-    ui.hIn.step = this.unit === "mm" ? mmStep : "8";
+    // Spinner steps stay on the 16 px grid: 16 px in px mode,
+    // the 16 px equivalent in mm mode. Typed values snap on change anyway.
+    const mmStep = String(Math.max(0.01, Math.round(((SNAP * MM_PER_INCH) / this.dpi) * 100) / 100));
+    ui.wIn.step = this.unit === "mm" ? mmStep : String(SNAP);
+    ui.hIn.step = this.unit === "mm" ? mmStep : String(SNAP);
     if (ui.unitPills) ui.unitPills.forEach((b) => b.classList.toggle("active", b.dataset.unit === this.unit));
     if (document.activeElement !== ui.dpiIn) ui.dpiIn.value = this.dpi;
     ui.dpiIn.disabled = this.unit !== "mm";
     ui.infoImg.innerHTML = `Input <b>${this.fmtLen(this.W)} × ${this.fmtLen(this.H)}</b>`;
     // Output = the node/backend canvas: the frame snapped OUTWARD to the
-    // 8 px VAE grid (floor origin, ceil far edge), same as the backend.
+    // 16 px VAE grid (floor origin, ceil far edge), same as the backend.
     const fx = Math.round(f.x);
     const fy = Math.round(f.y);
-    const rw = Math.max(8, Math.round(f.w));
-    const rh = Math.max(8, Math.round(f.h));
+    const rw = Math.max(SNAP, Math.round(f.w));
+    const rh = Math.max(SNAP, Math.round(f.h));
     const fxs = Math.floor(fx / SNAP) * SNAP;
     const fys = Math.floor(fy / SNAP) * SNAP;
     const fx1s = Math.ceil((fx + rw) / SNAP) * SNAP;
     const fy1s = Math.ceil((fy + rh) / SNAP) * SNAP;
-    const cw = Math.max(8, fx1s - fxs);
-    const ch = Math.max(8, fy1s - fys);
+    const cw = Math.max(SNAP, fx1s - fxs);
+    const ch = Math.max(SNAP, fy1s - fys);
     // Short MP readout: no long fraction tails.
     ui.infoFrame.innerHTML = `Output <b>${this.fmtLen(cw)} × ${this.fmtLen(ch)}</b> · ${fmtMP(mpFromWh(cw, ch))}`;
     ui.mpSlider.disabled = !this.mpOn;
@@ -1211,8 +1211,8 @@ const Editor = {
     const f0 = this.drag.f0;
     const f = this.frame;
     const minS = ceilSnap(MIN_DIM);
-    // The 8 px grid would otherwise catch the pointer on a shelf (e.g. a raw
-    // 12-19 px lands on 16) just outside the magnet zone, so the edge sticks
+    // The 16 px grid would otherwise catch the pointer on a shelf (e.g. a raw
+    // 8-23 px lands on 16) just outside the magnet zone, so the edge sticks
     // 16 px off the picture instead of meeting it. Widen the edge/center
     // magnet by one grid step so image edges and center lines always win.
     tol = tol + SNAP;
@@ -1272,12 +1272,12 @@ const Editor = {
     const f0 = this.drag.f0;
     const f = this.frame;
     const minS = ceilSnap(MIN_DIM);
-    // Same widened magnet as dragEdge: the 8 px grid shelf (12-19 px -> 16)
+    // Same widened magnet as dragEdge: the 16 px grid shelf (8-23 px -> 16)
     // must not beat the image edges/center lines.
     tol = tol + SNAP;
     // Snap the moving corner to the image edges (pad -> 0) and center lines.
     // Recorded (not re-derived later): the snap decision is made on the RAW
-    // pointer, zoom-proof, and re-applied exactly after 8-rounding.
+    // pointer, zoom-proof, and re-applied exactly after grid rounding.
     let snapX = null;
     let snapY = null;
     if (Math.abs(ix) <= tol) {
@@ -1350,7 +1350,7 @@ const Editor = {
     h = clamp(h, minS, this.maxDimForW(Math.max(minS, w)));
     w = clamp(w, minS, this.maxDimFor(Math.max(minS, h)));
     // Exact meet from the RECORDED pointer snap (zoom-proof): the moving
-    // side lands pixel-exactly even on non-8-divisible image sizes.
+    // side lands pixel-exactly even on non-16-divisible image sizes.
     // Degenerate sizes skipped; reverted on cap breach (cap wins).
     {
       const pw = w;
@@ -1443,7 +1443,7 @@ const Editor = {
     // Drive the size from the dominant axis for a natural feel.
     let w = roundSnap(Math.max(dw, dh * a));
     let h = roundSnap(w / a);
-    // Re-snap to keep both dims multiples of 8.
+    // Re-snap to keep both dims multiples of 16.
     h = roundSnap(h);
     w = roundSnap(h * a);
 
@@ -1474,7 +1474,7 @@ const Editor = {
     // MP cap as ONE uniform fit: scale the pair down together so the frame
     // slides along the limit instead of bouncing side by side (sequential
     // per-side clamps fight the pointer and shrink/jitter at the wall).
-    // Also covers 8-rounding overshoot: the hard cap always wins.
+    // Also covers grid rounding overshoot: the hard cap always wins.
     if (this.mpOn && w * h > this.mp * 1e6) {
       const sc = Math.sqrt((this.mp * 1e6) / (w * h));
       w = Math.max(minS, floorSnap(w * sc));
@@ -1486,7 +1486,7 @@ const Editor = {
       else { w = minS; h = roundSnap(minS / a); }
     }
     // Exact meet LAST from the recorded pointer snap (zoom-proof): the
-    // moving side lands pixel-exactly even on non-8-divisible image sizes.
+    // moving side lands pixel-exactly even on non-16-divisible image sizes.
     // Degenerate sizes skipped; reverted on cap breach (cap wins).
     {
       const pw = w;
@@ -1542,15 +1542,15 @@ const Editor = {
   updatePresetHighlight() {
     // Highlight the preset whose ratio matches the CURRENT frame ratio
     // (within a relative tolerance), even when the frame was set by dragging
-    // the handles. 8 px snapping means the ratio is never exact.
+    // the handles. 16 px snapping means the ratio is never exact.
     const ui = this.ui;
     if (!ui) return;
     const f = this.frame;
     if (!f.w || !f.h) return;
     const cur = f.w / f.h;
-    // 8 px snapping can shift the ratio more on small frames, so the match
+    // 16 px snapping can shift the ratio more on small frames, so the match
     // tolerance scales with the frame size (>= 2%).
-    const tol = Math.max(0.02, 8.0 / Math.max(f.w, f.h));
+    const tol = Math.max(0.02, SNAP / Math.max(f.w, f.h));
     let bestLabel = null;
     let bestErr = Infinity;
     for (const b of ui.pills) {
@@ -1578,7 +1578,7 @@ const Editor = {
       h0 = H;
       w0 = h0 * ratio;
     }
-    // Snap the driving side to 8 px, then derive the other side from the
+    // Snap the driving side to 16 px, then derive the other side from the
     // snapped value so the frame ratio stays close to the preset.
     const w = clamp(Math.max(ceilSnap(w0), ceilSnap(MIN_DIM)), ceilSnap(MIN_DIM), MAX_DIM);
     let h = roundSnap(w / ratio);
@@ -1639,7 +1639,7 @@ const Editor = {
     // Drags leave fractional coords behind; snap to whole pixels first so
     // the gap labels, the status bar and the pads sent to the backend all
     // describe the exact same frame. Then snap the frame OUTWARD to the
-    // 8 px VAE grid (same as the backend) so the saved state is already
+    // 16 px VAE grid (same as the backend) so the saved state is already
     // grid-aligned and reopening shows the exact same frame.
     f.x = Math.round(f.x);
     f.y = Math.round(f.y);
@@ -1648,12 +1648,12 @@ const Editor = {
     {
       const fxs = Math.floor(f.x / SNAP) * SNAP;
       const fys = Math.floor(f.y / SNAP) * SNAP;
-      const fx1s = Math.ceil((f.x + Math.max(8, f.w)) / SNAP) * SNAP;
-      const fy1s = Math.ceil((f.y + Math.max(8, f.h)) / SNAP) * SNAP;
+      const fx1s = Math.ceil((f.x + Math.max(SNAP, f.w)) / SNAP) * SNAP;
+      const fy1s = Math.ceil((f.y + Math.max(SNAP, f.h)) / SNAP) * SNAP;
       f.x = fxs;
       f.y = fys;
-      f.w = Math.max(8, fx1s - fxs);
-      f.h = Math.max(8, fy1s - fys);
+      f.w = Math.max(SNAP, fx1s - fxs);
+      f.h = Math.max(SNAP, fy1s - fys);
       this.boundsClamp(f);
     }
     const st = {
@@ -1677,9 +1677,9 @@ const Editor = {
       // Label = snapped backend canvas size, not the raw frame.
       const fxs = Math.floor(f.x / SNAP) * SNAP;
       const fys = Math.floor(f.y / SNAP) * SNAP;
-      const fx1s = Math.ceil((f.x + Math.max(8, f.w)) / SNAP) * SNAP;
-      const fy1s = Math.ceil((f.y + Math.max(8, f.h)) / SNAP) * SNAP;
-      updateNodePreview(this.node, url, { w: Math.max(8, fx1s - fxs), h: Math.max(8, fy1s - fys) });
+      const fx1s = Math.ceil((f.x + Math.max(SNAP, f.w)) / SNAP) * SNAP;
+      const fy1s = Math.ceil((f.y + Math.max(SNAP, f.h)) / SNAP) * SNAP;
+      updateNodePreview(this.node, url, { w: Math.max(SNAP, fx1s - fxs), h: Math.max(SNAP, fy1s - fys) });
     }
     if (app.graph && app.graph.change) app.graph.change();
     this.close();
@@ -1688,22 +1688,22 @@ const Editor = {
   drawComposite() {
     // Node preview: original image on the frame-selected canvas, outpaint
     // area in neutral checkerboard, thin frame border, no burned-in label.
-    // Canvas = frame snapped outward to 8 px (same as the backend output).
+    // Canvas = frame snapped outward to 16 px (same as the backend output).
     const f = this.frame;
     const fx = Math.round(f.x);
     const fy = Math.round(f.y);
-    const rw = Math.max(8, Math.round(f.w));
-    const rh = Math.max(8, Math.round(f.h));
+    const rw = Math.max(SNAP, Math.round(f.w));
+    const rh = Math.max(SNAP, Math.round(f.h));
     const fxs = Math.floor(fx / SNAP) * SNAP;
     const fys = Math.floor(fy / SNAP) * SNAP;
     const fx1s = Math.ceil((fx + rw) / SNAP) * SNAP;
     const fy1s = Math.ceil((fy + rh) / SNAP) * SNAP;
-    const sw = Math.max(8, fx1s - fxs);
-    const sh = Math.max(8, fy1s - fys);
+    const sw = Math.max(SNAP, fx1s - fxs);
+    const sh = Math.max(SNAP, fy1s - fys);
     const c = document.createElement("canvas");
     const sc = Math.min(1, 1024 / Math.max(sw, sh), 640 / Math.max(this.W, this.H));
-    c.width = Math.max(8, Math.round(sw * sc));
-    c.height = Math.max(8, Math.round(sh * sc));
+    c.width = Math.max(SNAP, Math.round(sw * sc));
+    c.height = Math.max(SNAP, Math.round(sh * sc));
     const ctx = c.getContext("2d");
     ctx.fillStyle = getGapPattern(ctx);
     ctx.fillRect(0, 0, c.width, c.height);

@@ -16,12 +16,12 @@ outpaint area:
   the frame and the image must always touch or overlap: the frame can
   never leave the picture fully. Frame sides snap exactly to the image
   edges and center lines at any zoom (the snap decision uses the raw
-  pointer, never the 8 px grid), even for non-8-divisible image sizes; a snapped
+  pointer, never the 16 px grid), even for non-16-divisible image sizes; a snapped
   side glows blue while held, and a dashed guide spans the image while
   snapped to a center line. The aspect-ratio preset buttons are
   ONE-SHOT size setters: they set the frame once and nothing keeps the
   ratio afterwards.
-- Snapping to the original image edges and to 8 px multiples.
+- Snapping to the original image edges and to 16 px multiples.
 - Aspect-ratio preset buttons (1:1, 3:2, 2:3, 4:3, 3:4, 16:9, 9:16,
   21:9, 9:21) shown as one segmented control. Each preset creates the
   SMALLEST frame with that ratio that still contains the image: one side
@@ -44,7 +44,7 @@ outpaint area:
   frame flash (never blinks continuously). Snapped frame sides glow blue
   while the mouse button is held.
 - Editable frame W/H inputs: typing a size keeps the frame position
-  and only changes the size (snapped to 8 px); the spinner steps by 8 px
+  and only changes the size (snapped to 16 px); the spinner steps by 16 px
   (or its mm equivalent). Live gap labels on every side and the frame
   size chip next to the frame show only while the cursor is inside the
   frame; the bottom info bar shows Image size → Output (canvas) size.
@@ -65,6 +65,17 @@ The node outputs:
 - `original_image` — FULL canvas (whole source + outpaint expansion,
   nothing cropped away): the source on mid-gray.
 - `crop_x` / `crop_y` — top-left position of the tile on the full canvas.
+
+## Frame alignment
+
+The render tile is snapped outward to a 16 px grid on save and in the
+backend. Both width and height are divisible by 16, preventing Flux2 VAE
+center-cropping of tiles that were previously only divisible by 8. The
+image, mask and merge coordinates use the same aligned frame. The source
+image is not resized or cropped; older saved frames may expand slightly.
+This also satisfies 8 px VAE alignment. Image-edge snapping remains exact
+while dragging; the output readout shows the final aligned dimensions.
+Outward alignment may add a small margin above the nominal megapixel cap.
 
 ## Install
 

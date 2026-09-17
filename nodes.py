@@ -15,7 +15,7 @@ import folder_paths
 
 # Canvas dimensions are snapped up to this multiple so the padded image stays
 # friendly to latent-space (VAE) based outpainting workflows.
-SIZE_SNAP = 8
+SIZE_SNAP = 16
 PREVIEW_DIR_NAME = "outpaint_mask"
 PREVIEW_KEEP = 50
 MAX_PAD = 16384               # absolute clamp for frame pads (negative pad = crop)
@@ -227,11 +227,10 @@ class OutpaintMaskEditor:
             w, h = src.size
             l, t, r, b = state["l"], state["t"], state["r"], state["b"]
             # Frame rect in image coords: top-left (fx, fy), raw size from
-            # the pads. The tile is the frame snapped OUTWARD to the 8 px
-            # VAE grid (floor origin, ceil far edge): only extra outpaint
-            # area is added, never extra crop. This keeps crop_x/crop_y on
-            # the 8 px grid so the tile and the full canvas composite
-            # without a 1-7 px shift on non-8-divisible images.
+            # the pads. Snap OUTWARD to the 16 px grid (floor origin, ceil
+            # far edge), retaining all selected pixels. Image, mask and merge
+            # coordinates share this frame. Flux2's 16 px VAE therefore does
+            # not center-crop an 8-aligned tile and shift its content by 4 px.
             fx, fy = -l, -t
             raw_w = max(SIZE_SNAP, w + l + r)
             raw_h = max(SIZE_SNAP, h + t + b)
