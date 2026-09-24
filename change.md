@@ -1,8 +1,18 @@
 # ComfyUI Outpaint Mask — Changelog
 
-* **Total commits:** 9
-* **Date range:** 2026-09-12 – 2026-09-17
-* **Environment / Context:** Published to the Comfy Registry as `comfyui-outpaintmask` 1.15.0; Manager listing PR #3293 still awaiting approval
+* **Total commits:** 10
+* **Date range:** 2026-09-12 – 2026-09-24
+* **Environment / Context:** Published to the Comfy Registry as `comfyui-outpaintmask` 1.15.0; Manager listing PR #3293 still awaiting approval; 1.15.1 is a post-release stability fix
+
+---
+
+### <sup><sub style="font-size: 0.7em;">2026-09-24</sub></sup> · 🐛 Fixes · Mask Frame Survives Workflow Tab Switches
+* Fixed the mask frame resetting on every workflow tab switch: tab switches recreate the node and apply saved widget values only after creation, so the image-change watcher compared the restored image against the dropdown default and mistook the restore for a user image swap.
+* Wrapped `onConfigure` to re-sync the tracked image and state from the restored widgets without resetting, and added an `_opm_restoring` guard across all three reset paths (editor open, widget callback, self-heal tick).
+* Genuine image swaps (dropdown, upload, clipboard paste) still reset the frame as before; the fix also covers workflow load and node clone/duplicate.
+* Updated the package version to 1.15.1.
+
+`Direct Commit` · `239e59d`
 
 ---
 
