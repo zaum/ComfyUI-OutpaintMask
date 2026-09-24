@@ -3,7 +3,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-const VERSION = "1.15.1";
+const VERSION = "1.15.2";
 const NODE_NAME = "OutpaintMaskEditor";
 const SNAP = 16;                 // shared frame grid for Flux2 and 8 px VAEs
 const EDGE_SNAP_PX = 10;         // screen-px tolerance for snapping to image edges
@@ -1674,6 +1674,7 @@ const Editor = {
     const url = this.drawComposite();
     if (url) {
       this.node._opm_preview = url;
+      this.node._opm_previewKey = null;
       // Label = snapped backend canvas size, not the raw frame.
       const fxs = Math.floor(f.x / SNAP) * SNAP;
       const fys = Math.floor(f.y / SNAP) * SNAP;
@@ -1728,7 +1729,7 @@ const Editor = {
 // ------------------------------------------------- node preview update
 
 function updateNodePreview(node, dataUrl, dims) {
-  if (!dataUrl) return;
+  if (!dataUrl) return false;
   if (isLegacy()) {
     // Nodes 1 (canvas UI): swap node.imgs[0] to the composite.
     const img = new Image();
@@ -1742,10 +1743,66 @@ function updateNodePreview(node, dataUrl, dims) {
       }
     };
     img.src = dataUrl;
+    return true;
   } else {
     // Nodes 2 (Vue UI): replace the preview img with the composite.
-    setDomPreview(node, dataUrl, dims);
+    return setDomPreview(node, dataUrl, dims);
   }
+}
+
+// Rebuild the node preview from the restored outpaint state. A tab switch
+// recreates the node and the backend preview is still the original image;
+// recreating the composite here keeps the padding visible until the next run.
+function opmRestoreNodePreview(node) {
+  if (!node) return;
+  const raw = node._opm_state || "";
+  const st = parseState(raw);
+  if (!raw.trim()) return;
+  const key = JSON.stringify(st);
+  if (node._opm_previewKey === key) return;
+  const ref = node._opm_source || null;
+  let sourceUrl = null;
+  if (ref && ref.filename) {
+    sourceUrl = buildViewURL(ref, true);
+  } else {
+    const w = (node.widgets || []).find((x) => x && x.name === "image");
+    if (w && typeof w.value === "string" && w.value) {
+      const parts = w.value.split("/");
+      sourceUrl = buildViewURL({ filename: parts.pop(), subfolder: parts.join("/"), type: "input" }, true);
+    }
+  }
+  if (!sourceUrl) return;
+  loadImageURL(sourceUrl).then((img) => {
+    if (!img || !img.naturalWidth || !img.naturalHeight) return;
+    const W = img.naturalWidth;
+    const H = img.naturalHeight;
+    const fx = -st.l;
+    const fy = -st.t;
+    const fw = Math.max(SNAP, W + st.l + st.r);
+    const fh = Math.max(SNAP, H + st.t + st.b);
+    const fxs = floorSnap(fx);
+    const fys = floorSnap(fy);
+    const fx1s = ceilSnap(fx + fw);
+    const fy1s = ceilSnap(fy + fh);
+    const sw = Math.max(SNAP, fx1s - fxs);
+    const sh = Math.max(SNAP, fy1s - fys);
+    const c = document.createElement("canvas");
+    const scale = Math.min(1, 1024 / Math.max(sw, sh), 640 / Math.max(W, H));
+    c.width = Math.max(SNAP, Math.round(sw * scale));
+    c.height = Math.max(SNAP, Math.round(sh * scale));
+    const ctx = c.getContext("2d");
+    ctx.fillStyle = getGapPattern(ctx);
+    ctx.fillRect(0, 0, c.width, c.height);
+    ctx.drawImage(img, Math.round(-fxs * scale), Math.round(-fys * scale), Math.round(W * scale), Math.round(H * scale));
+    ctx.strokeStyle = "#4f8cff";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(0.5, 0.5, c.width - 1, c.height - 1);
+    const url = c.toDataURL("image/jpeg", 0.88);
+    if (updateNodePreview(node, url, { w: sw, h: sh })) {
+      node._opm_preview = url;
+      node._opm_previewKey = key;
+    }
+  }).catch(() => {});
 }
 
 function findPreviewImg(cont) {
@@ -1766,9 +1823,9 @@ function findPreviewImg(cont) {
 function setDomPreview(node, url, dims) {
   try {
     const cont = document.querySelector(`[data-node-id="${node.id}"]`);
-    if (!cont) return;
+    if (!cont) return false;
     const ref = findPreviewImg(cont);
-    if (!ref) return;
+    if (!ref) return false;
     if (getComputedStyle(cont).position === "static") cont.style.position = "relative";
     let ov = cont.querySelector("img.opm-tint");
     if (!ov) {
@@ -1803,8 +1860,10 @@ function setDomPreview(node, url, dims) {
       ref.addEventListener("click", open);
       ref._opmClickWired = true;
     }
+    return true;
   } catch (e) {
     /* best-effort preview */
+    return false;
   }
 }
 
@@ -1972,6 +2031,7 @@ function opmResetForNewImage(node) {
     }
     node._opm_source = null;
     node._opm_preview = null;
+    node._opm_previewKey = null;
   } catch (e) { /* never break image switching over state reset */ }
 }
 
@@ -2025,6 +2085,10 @@ function installRestoreGuard(node) {
         if (sw && typeof sw.value === "string" && sw.value.trim()) node._opm_state = sw.value;
       } catch (e) { /* ignore */ }
       node._opm_restoring = false;
+      // Recreate the composite after the frontend has applied the restored
+      // widgets. The timeout covers both legacy configure and Vue DOM setup.
+      setTimeout(() => opmRestoreNodePreview(node), 0);
+      setTimeout(() => opmRestoreNodePreview(node), 250);
     };
     node._opm_restoring = true;
     const origConfigure = node.onConfigure;

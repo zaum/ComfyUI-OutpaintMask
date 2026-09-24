@@ -1,10 +1,21 @@
 # ComfyUI Outpaint Mask — Changelog
 
-* **Total commits:** 10
+* **Total commits:** 11
 * **Date range:** 2026-09-12 – 2026-09-24
-* **Environment / Context:** Published to the Comfy Registry as `comfyui-outpaintmask` 1.15.0; Manager listing PR #3293 still awaiting approval; 1.15.1 is a post-release stability fix
+* **Environment / Context:** Published to the Comfy Registry as `comfyui-outpaintmask` 1.15.0; Manager listing PR #3293 still awaiting approval; 1.15.2 is a post-release stability fix
 
 ---
+
+### <sup><sub style="font-size: 0.7em;">2026-09-24</sub></sup> · 🐛 Fixes · Restored Outpaint Preview Persistence
+* Recreated the node preview from the restored `outpaint_state` after workflow or tab loading, preventing the canvas from reverting to the un-outpainted source image.
+* Added delayed retry scheduling so both the legacy LiteGraph canvas and the Vue DOM preview can finish rendering before the composite is applied.
+* Preserved the restored mask state while allowing genuine image changes to continue resetting the frame as intended.
+* Updated the package version to 1.15.2.
+
+`Direct Commit` · `7a5417d`
+
+---
+
 
 ### <sup><sub style="font-size: 0.7em;">2026-09-24</sub></sup> · 🐛 Fixes · Mask Frame Survives Workflow Tab Switches
 * Fixed the mask frame resetting on every workflow tab switch: tab switches recreate the node and apply saved widget values only after creation, so the image-change watcher compared the restored image against the dropdown default and mistook the restore for a user image swap.
