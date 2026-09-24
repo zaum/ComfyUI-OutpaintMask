@@ -3,7 +3,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-const VERSION = "1.15.0";
+const VERSION = "1.15.1";
 const NODE_NAME = "OutpaintMaskEditor";
 const SNAP = 16;                 // shared frame grid for Flux2 and 8 px VAEs
 const EDGE_SNAP_PX = 10;         // screen-px tolerance for snapping to image edges
@@ -509,7 +509,7 @@ const Editor = {
     try {
       const iw = (node.widgets || []).find((x) => x && x.name === "image");
       const iv = (iw && typeof iw.value === "string") ? iw.value : null;
-      if (iv && node._opm_imageVal !== undefined && iv !== node._opm_imageVal) {
+      if (!node._opm_restoring && iv && node._opm_imageVal !== undefined && iv !== node._opm_imageVal) {
         opmResetForNewImage(node);
         opmRefreshNodePreviewForImage(node, iv);
       }
@@ -1991,6 +1991,7 @@ function watchImageWidget(node) {
         if (typeof prev === "function") prev.apply(this, arguments);
       } catch (e) { /* ignore */ }
       try {
+        if (node._opm_restoring) return; // workflow/tab restore, not a user swap
         const cur = (typeof v === "string") ? v : (w ? w.value : null);
         if (typeof cur === "string" && cur && cur !== node._opm_imageVal) {
           node._opm_imageVal = cur;
@@ -2000,6 +2001,44 @@ function watchImageWidget(node) {
         }
       } catch (e) { /* ignore */ }
     };
+  } catch (e) { /* ignore */ }
+}
+
+function installRestoreGuard(node) {
+  // Tab switch / workflow load / clone recreates the node: nodeCreated (and
+  // watchImageWidget's initial _opm_imageVal capture) run BEFORE the saved
+  // widget values are applied, so the tracked image is the dropdown default
+  // (first file in the input list), not the saved file. Every image-mismatch
+  // path (editor open, widget callback, 2 s tick) then mistakes the restore
+  // for a user image swap and resets the mask frame. Fix: wrap onConfigure
+  // (LiteGraph calls it at the END of value restore) and re-sync the tracked
+  // image + state from the restored widgets WITHOUT resetting. The
+  // _opm_restoring flag additionally mutes the watcher callback for
+  // frontends that fire it while applying restored values.
+  try {
+    const syncRestored = () => {
+      try {
+        const iw = (node.widgets || []).find((x) => x && x.name === "image");
+        const iv = iw && typeof iw.value === "string" ? iw.value : null;
+        if (iv) node._opm_imageVal = iv;
+        const sw = (node.widgets || []).find((x) => x && x.name === "outpaint_state");
+        if (sw && typeof sw.value === "string" && sw.value.trim()) node._opm_state = sw.value;
+      } catch (e) { /* ignore */ }
+      node._opm_restoring = false;
+    };
+    node._opm_restoring = true;
+    const origConfigure = node.onConfigure;
+    node.onConfigure = function () {
+      try {
+        if (typeof origConfigure === "function") origConfigure.apply(this, arguments);
+      } catch (e) { /* ignore */ }
+      syncRestored();
+    };
+    // A node added by hand never gets configure(): release the guard right
+    // after creation, or the first genuine image swap would not reset.
+    setTimeout(() => {
+      if (node._opm_restoring) syncRestored();
+    }, 0);
   } catch (e) { /* ignore */ }
 }
 
@@ -2304,7 +2343,7 @@ setInterval(() => {
       try {
         const iw = (n.widgets || []).find((x) => x && x.name === "image");
         const iv = (iw && typeof iw.value === "string") ? iw.value : null;
-        if (iv && n._opm_imageVal !== undefined && iv !== n._opm_imageVal) {
+        if (!n._opm_restoring && iv && n._opm_imageVal !== undefined && iv !== n._opm_imageVal) {
           n._opm_imageVal = iv;
           opmResetForNewImage(n);
           opmRefreshNodePreviewForImage(n, iv);
@@ -2539,6 +2578,10 @@ function setupNode(node) {
     installOpmPaste(node);
     // Track manual image swaps (dropdown/upload): reset the mask frame.
     watchImageWidget(node);
+    // Workflow load / tab switch / clone recreates the node BEFORE the saved
+    // widget values are applied: keep the image-swap reset from firing on
+    // that restore (it wiped the mask frame on every tab switch).
+    installRestoreGuard(node);
     // Right-click menu entry.
     const origMenu = node.getExtraMenuOptions;
     node.getExtraMenuOptions = function (canvas, menu) {
