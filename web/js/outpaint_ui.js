@@ -3,7 +3,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-const VERSION = "1.15.0";
+const VERSION = "1.15.2";
 const NODE_NAME = "OutpaintMaskEditor";
 const SNAP = 16;                 // shared frame grid for Flux2 and 8 px VAEs
 const EDGE_SNAP_PX = 10;         // screen-px tolerance for snapping to image edges
@@ -509,7 +509,7 @@ const Editor = {
     try {
       const iw = (node.widgets || []).find((x) => x && x.name === "image");
       const iv = (iw && typeof iw.value === "string") ? iw.value : null;
-      if (iv && node._opm_imageVal !== undefined && iv !== node._opm_imageVal) {
+      if (!node._opm_restoring && iv && node._opm_imageVal !== undefined && iv !== node._opm_imageVal) {
         opmResetForNewImage(node);
         opmRefreshNodePreviewForImage(node, iv);
       }
@@ -1674,6 +1674,7 @@ const Editor = {
     const url = this.drawComposite();
     if (url) {
       this.node._opm_preview = url;
+      this.node._opm_previewKey = null;
       // Label = snapped backend canvas size, not the raw frame.
       const fxs = Math.floor(f.x / SNAP) * SNAP;
       const fys = Math.floor(f.y / SNAP) * SNAP;
@@ -1728,7 +1729,7 @@ const Editor = {
 // ------------------------------------------------- node preview update
 
 function updateNodePreview(node, dataUrl, dims) {
-  if (!dataUrl) return;
+  if (!dataUrl) return false;
   if (isLegacy()) {
     // Nodes 1 (canvas UI): swap node.imgs[0] to the composite.
     const img = new Image();
@@ -1742,10 +1743,66 @@ function updateNodePreview(node, dataUrl, dims) {
       }
     };
     img.src = dataUrl;
+    return true;
   } else {
     // Nodes 2 (Vue UI): replace the preview img with the composite.
-    setDomPreview(node, dataUrl, dims);
+    return setDomPreview(node, dataUrl, dims);
   }
+}
+
+// Rebuild the node preview from the restored outpaint state. A tab switch
+// recreates the node and the backend preview is still the original image;
+// recreating the composite here keeps the padding visible until the next run.
+function opmRestoreNodePreview(node) {
+  if (!node) return;
+  const raw = node._opm_state || "";
+  const st = parseState(raw);
+  if (!raw.trim()) return;
+  const key = JSON.stringify(st);
+  if (node._opm_previewKey === key) return;
+  const ref = node._opm_source || null;
+  let sourceUrl = null;
+  if (ref && ref.filename) {
+    sourceUrl = buildViewURL(ref, true);
+  } else {
+    const w = (node.widgets || []).find((x) => x && x.name === "image");
+    if (w && typeof w.value === "string" && w.value) {
+      const parts = w.value.split("/");
+      sourceUrl = buildViewURL({ filename: parts.pop(), subfolder: parts.join("/"), type: "input" }, true);
+    }
+  }
+  if (!sourceUrl) return;
+  loadImageURL(sourceUrl).then((img) => {
+    if (!img || !img.naturalWidth || !img.naturalHeight) return;
+    const W = img.naturalWidth;
+    const H = img.naturalHeight;
+    const fx = -st.l;
+    const fy = -st.t;
+    const fw = Math.max(SNAP, W + st.l + st.r);
+    const fh = Math.max(SNAP, H + st.t + st.b);
+    const fxs = floorSnap(fx);
+    const fys = floorSnap(fy);
+    const fx1s = ceilSnap(fx + fw);
+    const fy1s = ceilSnap(fy + fh);
+    const sw = Math.max(SNAP, fx1s - fxs);
+    const sh = Math.max(SNAP, fy1s - fys);
+    const c = document.createElement("canvas");
+    const scale = Math.min(1, 1024 / Math.max(sw, sh), 640 / Math.max(W, H));
+    c.width = Math.max(SNAP, Math.round(sw * scale));
+    c.height = Math.max(SNAP, Math.round(sh * scale));
+    const ctx = c.getContext("2d");
+    ctx.fillStyle = getGapPattern(ctx);
+    ctx.fillRect(0, 0, c.width, c.height);
+    ctx.drawImage(img, Math.round(-fxs * scale), Math.round(-fys * scale), Math.round(W * scale), Math.round(H * scale));
+    ctx.strokeStyle = "#4f8cff";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(0.5, 0.5, c.width - 1, c.height - 1);
+    const url = c.toDataURL("image/jpeg", 0.88);
+    if (updateNodePreview(node, url, { w: sw, h: sh })) {
+      node._opm_preview = url;
+      node._opm_previewKey = key;
+    }
+  }).catch(() => {});
 }
 
 function findPreviewImg(cont) {
@@ -1766,9 +1823,9 @@ function findPreviewImg(cont) {
 function setDomPreview(node, url, dims) {
   try {
     const cont = document.querySelector(`[data-node-id="${node.id}"]`);
-    if (!cont) return;
+    if (!cont) return false;
     const ref = findPreviewImg(cont);
-    if (!ref) return;
+    if (!ref) return false;
     if (getComputedStyle(cont).position === "static") cont.style.position = "relative";
     let ov = cont.querySelector("img.opm-tint");
     if (!ov) {
@@ -1803,8 +1860,10 @@ function setDomPreview(node, url, dims) {
       ref.addEventListener("click", open);
       ref._opmClickWired = true;
     }
+    return true;
   } catch (e) {
     /* best-effort preview */
+    return false;
   }
 }
 
@@ -1889,12 +1948,43 @@ function fitOverlay(ov) {
 
 // Fallback copy of the native preview action button classes (h-8 = 32px).
 // Used only when the native download button has not rendered yet.
-const OPM_NATIVE_BTN_CLS = "flex h-8 min-h-8 cursor-pointer items-center justify-center rounded-lg border-0 bg-base-foreground p-2 text-base-background shadow-interface transition-colors duration-200 hover:bg-base-foreground/90";
+const OPM_NATIVE_BTN_CLS = "relative inline-flex cursor-pointer touch-manipulation appearance-none items-center justify-center gap-2 border-none font-inter text-sm font-medium whitespace-nowrap transition-colors focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([width]):not([height])]:size-4 bg-foreground text-background hover:bg-foreground/80 size-8 rounded-lg shadow-md";
 // Gap between the paste and download icons (native flex gap + extra margin).
 const OPM_PASTE_GAP = 8;
 
 function opmIconPaste() {
-  return '<i class="icon-[lucide--clipboard-paste] size-4" aria-hidden="true"></i>';
+  return '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" ' +
+    'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+    'stroke-linejoin="round" aria-hidden="true">' +
+    '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>' +
+    '<path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
+}
+
+const OPM_COPY_GAP = 8;
+const OPM_MAIN_IMAGE_SELECTOR = "img:not(.opm-tint)";
+
+const ICON_COPY =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" ' +
+  'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+  'stroke-linejoin="round" aria-hidden="true">' +
+  '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>' +
+  '<path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
+const ICON_OK =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" ' +
+  'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+  'stroke-linejoin="round" aria-hidden="true">' +
+  '<path d="M20 6 9 17l-5-5"/></svg>';
+const ICON_FAIL =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" ' +
+  'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+  'stroke-linejoin="round" aria-hidden="true">' +
+  '<path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
+async function opmFetchImageBlob(url) {
+  const absolute = new URL(url, window.location.href);
+  absolute.searchParams.delete("preview");
+  const response = await fetch(absolute.toString());
+  if (!response.ok) throw new Error(`Image download failed: ${response.status}`);
+  return await response.blob();
 }
 
 function opmApplyNewImageToNode(node, value) {
@@ -1902,6 +1992,29 @@ function opmApplyNewImageToNode(node, value) {
   const oldVal = imgW ? imgW.value : undefined;
   const setW = (name, v) => {
     const w = (node.widgets || []).find((x) => x && x.name === name);
+async function opmReencodeAsPngBlob(blob, width, height) {
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, width || 0);
+  canvas.height = Math.max(1, height || 0);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Could not get canvas context");
+  let image;
+  if (typeof window.createImageBitmap === "undefined") {
+    image = await new Promise((resolve, reject) => {
+      const img = new Image();
+      const objectUrl = URL.createObjectURL(blob);
+      img.onload = () => { URL.revokeObjectURL(objectUrl); resolve(img); };
+      img.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error("Image load failed")); };
+      img.src = objectUrl;
+    });
+  } else {
+    image = await createImageBitmap(blob);
+  }
+  try { ctx.drawImage(image, 0, 0); } finally { if (image && typeof image.close === "function") image.close(); }
+  return await new Promise((resolve, reject) => {
+    canvas.toBlob((result) => { if (result) resolve(result); else reject(new Error("PNG conversion failed")); }, "image/png");
+  });
+}
     if (!w) return;
     if (name === "image") {
       // Make sure the combo accepts the freshly uploaded file name.
@@ -1920,10 +2033,34 @@ function opmApplyNewImageToNode(node, value) {
       }
     }
   };
+async function opmWriteBlobToClipboard(blob, naturalWidth, naturalHeight) {
+  try {
+    await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+  } catch (error) {
+    if (blob.type !== "image/png") {
+      const pngBlob = await opmReencodeAsPngBlob(blob, naturalWidth, naturalHeight);
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": pngBlob })]);
+      return;
+    }
+    throw error;
+  }
+}
   setW("image", value);
   // Notify the graph layer exactly like the built-in upload flow does, or
   // the dropdown DOM and the queue validation never learn the new value.
   try {
+function opmFlash(button, ok) {
+  const original = button.innerHTML;
+  const originalTitle = button.title;
+  button.innerHTML = ok ? ICON_OK : ICON_FAIL;
+  button.title = ok ? "Copied to clipboard" : "Copy failed";
+  window.setTimeout(() => {
+    if (button.isConnected) {
+      button.innerHTML = original;
+      button.title = originalTitle;
+    }
+  }, 1200);
+}
     if (typeof node.onWidgetChanged === "function") {
       node.onWidgetChanged("image", value, oldVal, imgW || null);
     }
@@ -1934,6 +2071,24 @@ function opmApplyNewImageToNode(node, value) {
   // open the previous picture) and resets the mask frame to the new image.
   opmResetForNewImage(node);
   try {
+async function opmHandleCopyClick(button) {
+  const box = button.closest(".opm-preview-box") || button.parentElement;
+  if (!box || !box.isConnected) return;
+  const img = box.querySelector(OPM_MAIN_IMAGE_SELECTOR);
+  if (!img || !img.src) { opmFlash(button, false); return; }
+  if (typeof window.ClipboardItem === "undefined") { opmFlash(button, false); return; }
+  button.disabled = true;
+  try {
+    const blob = await opmFetchImageBlob(img.currentSrc || img.src);
+    await opmWriteBlobToClipboard(blob, img.naturalWidth, img.naturalHeight);
+    opmFlash(button, true);
+  } catch (error) {
+    console.error("[OutpaintCopy] copy to clipboard failed:", error);
+    opmFlash(button, false);
+  } finally {
+    button.disabled = false;
+  }
+}
     node._opm_imageVal = value;
   } catch (e) {
     /* ignore */
@@ -1941,6 +2096,20 @@ function opmApplyNewImageToNode(node, value) {
   opmShowPastedPreview(node, value);
   try {
     if (app.graph && app.graph.change) app.graph.change();
+function opmCreateCopyButton() {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `opm-preview-copy opm-extra-gap ${OPM_NATIVE_BTN_CLS}`;
+  button.title = "Copy image";
+  button.setAttribute("aria-label", "Copy image");
+  button.innerHTML = ICON_COPY;
+  button.style.marginRight = `${OPM_COPY_GAP}px`;
+  for (const type of ["pointerdown","pointermove","pointerenter","mousedown","mousemove","mouseenter","mouseover","mouseup","click","dblclick"]) {
+    button.addEventListener(type, (event) => event.stopPropagation());
+  }
+  button.addEventListener("click", (event) => { event.preventDefault(); void opmHandleCopyClick(button); });
+  return button;
+}
   } catch (e) {
     /* ignore */
   }
@@ -1954,12 +2123,73 @@ function opmResetForNewImage(node) {
   try {
     const w = (node.widgets || []).find((x) => x && x.name === "outpaint_state");
     let st = null;
+function opmFindNativeCopyBtn(box) {
+  try { return box.querySelector(".opm-preview-copy"); } catch (e) { return null; }
+}
     try { st = parseState(w ? w.value : (node._opm_state || "{}")); } catch (e) { st = null; }
     const keep = st && typeof st === "object" ? st : {};
     const next = {
       v: 1, l: 0, t: 0, r: 0, b: 0,
       mp_on: keep.mp_on !== false,
       mp: Number.isFinite(Number(keep.mp)) ? keep.mp : DEFAULT_MP,
+function opmEnsurePreviewCopyButton(node) {
+  try {
+    const cont = document.querySelector(`[data-node-id="${node.id}"]`);
+    if (!cont) return;
+    const preview = findPreviewImg(cont);
+    if (!preview) return;
+    const box = preview.parentElement;
+    if (!box) return;
+    const actions = opmFindNativeActions(box);
+    const native = opmFindNativeDownloadBtn(box);
+    const btnCls = (native && typeof native.className === "string" && native.className) || OPM_NATIVE_BTN_CLS;
+    let b = box._opmCopyBtn;
+    if (b && b.isConnected) {
+      if (b._opmNativeCls !== btnCls) {
+        b._opmNativeCls = btnCls;
+        b.className = `opm-preview-copy opm-extra-gap ${btnCls}`;
+      }
+      if (actions) {
+        b.style.left = ""; b.style.top = ""; b.style.width = ""; b.style.height = ""; b.style.right = ""; b.style.position = "";
+        const paste = box._opmPasteBtn;
+        const ref = paste || native;
+        if (ref && ref.parentElement === actions) {
+          actions.insertBefore(b, ref.nextSibling);
+        } else if (actions.firstChild !== b) {
+          actions.insertBefore(b, actions.firstChild);
+        }
+      } else {
+        opmPlaceFallbackBtn(box, b, native);
+      }
+      return;
+    }
+    const nb = document.createElement("button");
+    nb.type = "button";
+    nb._opmNativeCls = btnCls;
+    nb.innerHTML = ICON_COPY;
+    nb.title = "Copy image";
+    nb.setAttribute("aria-label", "Copy image");
+    nb.addEventListener("pointerdown", (e) => e.stopPropagation());
+    nb.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); opmHandleCopyClick(nb); });
+    if (actions) {
+      nb.className = `opm-preview-copy opm-extra-gap ${btnCls}`;
+      const paste = box._opmPasteBtn;
+      const ref = paste || native;
+      if (ref && ref.parentElement === actions) {
+        actions.insertBefore(nb, ref.nextSibling);
+      } else {
+        actions.insertBefore(nb, actions.firstChild);
+      }
+    } else {
+      if (getComputedStyle(box).position === "static") box.style.position = "relative";
+      box.classList.add("opm-preview-box");
+      nb.className = `opm-preview-copy opm-fallback ${btnCls}`;
+      opmPlaceFallbackBtn(box, nb, native);
+      box.appendChild(nb);
+    }
+    box._opmCopyBtn = nb;
+  } catch (e) { /* never break the app over cosmetics */ }
+}
       unit: keep.unit === "mm" ? "mm" : "px",
       dpi: Number.isFinite(Number(keep.dpi)) ? keep.dpi : DEFAULT_DPI,
     };
@@ -1972,6 +2202,7 @@ function opmResetForNewImage(node) {
     }
     node._opm_source = null;
     node._opm_preview = null;
+    node._opm_previewKey = null;
   } catch (e) { /* never break image switching over state reset */ }
 }
 
@@ -1991,6 +2222,7 @@ function watchImageWidget(node) {
         if (typeof prev === "function") prev.apply(this, arguments);
       } catch (e) { /* ignore */ }
       try {
+        if (node._opm_restoring) return; // workflow/tab restore, not a user swap
         const cur = (typeof v === "string") ? v : (w ? w.value : null);
         if (typeof cur === "string" && cur && cur !== node._opm_imageVal) {
           node._opm_imageVal = cur;
@@ -2000,6 +2232,48 @@ function watchImageWidget(node) {
         }
       } catch (e) { /* ignore */ }
     };
+  } catch (e) { /* ignore */ }
+}
+
+function installRestoreGuard(node) {
+  // Tab switch / workflow load / clone recreates the node: nodeCreated (and
+  // watchImageWidget's initial _opm_imageVal capture) run BEFORE the saved
+  // widget values are applied, so the tracked image is the dropdown default
+  // (first file in the input list), not the saved file. Every image-mismatch
+  // path (editor open, widget callback, 2 s tick) then mistakes the restore
+  // for a user image swap and resets the mask frame. Fix: wrap onConfigure
+  // (LiteGraph calls it at the END of value restore) and re-sync the tracked
+  // image + state from the restored widgets WITHOUT resetting. The
+  // _opm_restoring flag additionally mutes the watcher callback for
+  // frontends that fire it while applying restored values.
+  try {
+    const syncRestored = () => {
+      try {
+        const iw = (node.widgets || []).find((x) => x && x.name === "image");
+        const iv = iw && typeof iw.value === "string" ? iw.value : null;
+        if (iv) node._opm_imageVal = iv;
+        const sw = (node.widgets || []).find((x) => x && x.name === "outpaint_state");
+        if (sw && typeof sw.value === "string" && sw.value.trim()) node._opm_state = sw.value;
+      } catch (e) { /* ignore */ }
+      node._opm_restoring = false;
+      // Recreate the composite after the frontend has applied the restored
+      // widgets. The timeout covers both legacy configure and Vue DOM setup.
+      setTimeout(() => opmRestoreNodePreview(node), 0);
+      setTimeout(() => opmRestoreNodePreview(node), 250);
+    };
+    node._opm_restoring = true;
+    const origConfigure = node.onConfigure;
+    node.onConfigure = function () {
+      try {
+        if (typeof origConfigure === "function") origConfigure.apply(this, arguments);
+      } catch (e) { /* ignore */ }
+      syncRestored();
+    };
+    // A node added by hand never gets configure(): release the guard right
+    // after creation, or the first genuine image swap would not reset.
+    setTimeout(() => {
+      if (node._opm_restoring) syncRestored();
+    }, 0);
   } catch (e) { /* ignore */ }
 }
 
@@ -2150,8 +2424,9 @@ function opmFindNativeDownloadBtn(box) {
   try {
     const els = box.querySelectorAll("button, a");
     for (const b of els) {
-      if (!b || b === box._opmPasteBtn) continue;
+      if (!b || b === box._opmPasteBtn || b === box._opmCopyBtn) continue;
       if (b.classList && b.classList.contains("opm-preview-paste")) continue;
+      if (b.classList && b.classList.contains("opm-preview-copy")) continue;
       const html = (b.innerHTML || "").toLowerCase();
       if (html.indexOf("lucide--download") !== -1) return b;
       const lab = (((b.getAttribute && b.getAttribute("aria-label")) || "") + " " +
@@ -2274,6 +2549,7 @@ function ensurePreviewPasteButton(node) {
       box.appendChild(nb);
     }
     box._opmPasteBtn = nb;
+    opmEnsurePreviewCopyButton(node);
   } catch (e) {
     /* never break the app over cosmetics */
   }
@@ -2298,13 +2574,14 @@ setInterval(() => {
         wireNodePreviewClick(n);
         keepOpenButtonBelowPreview(n);
         ensurePreviewPasteButton(n);
+        opmEnsurePreviewCopyButton(n);
       }
       // Safety net for image swaps that bypass the widget callback:
       // reset the mask frame to the new image and refresh the preview.
       try {
         const iw = (n.widgets || []).find((x) => x && x.name === "image");
         const iv = (iw && typeof iw.value === "string") ? iw.value : null;
-        if (iv && n._opm_imageVal !== undefined && iv !== n._opm_imageVal) {
+        if (!n._opm_restoring && iv && n._opm_imageVal !== undefined && iv !== n._opm_imageVal) {
           n._opm_imageVal = iv;
           opmResetForNewImage(n);
           opmRefreshNodePreviewForImage(n, iv);
@@ -2539,6 +2816,10 @@ function setupNode(node) {
     installOpmPaste(node);
     // Track manual image swaps (dropdown/upload): reset the mask frame.
     watchImageWidget(node);
+    // Workflow load / tab switch / clone recreates the node BEFORE the saved
+    // widget values are applied: keep the image-swap reset from firing on
+    // that restore (it wiped the mask frame on every tab switch).
+    installRestoreGuard(node);
     // Right-click menu entry.
     const origMenu = node.getExtraMenuOptions;
     node.getExtraMenuOptions = function (canvas, menu) {
