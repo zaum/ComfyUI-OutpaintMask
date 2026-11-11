@@ -3,7 +3,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-const VERSION = "1.15.2";
+const VERSION = "1.15.4";
 const NODE_NAME = "OutpaintMaskEditor";
 const SNAP = 16;                 // shared frame grid for Flux2 and 8 px VAEs
 const EDGE_SNAP_PX = 10;         // screen-px tolerance for snapping to image edges
@@ -1806,6 +1806,10 @@ function opmRestoreNodePreview(node) {
 }
 
 function findPreviewImg(cont) {
+  // Frontend 1.58+ renders the core preview as img[data-testid="main-image"]
+  // (its own pointer-events are none, so the click wiring lives on the panel).
+  const main = cont.querySelector('img[data-testid="main-image"]');
+  if (main && !main.classList.contains("opm-tint")) return main;
   let best = null;
   let bestArea = 0;
   cont.querySelectorAll("img").forEach((im) => {
@@ -1826,6 +1830,7 @@ function setDomPreview(node, url, dims) {
     if (!cont) return false;
     const ref = findPreviewImg(cont);
     if (!ref) return false;
+    opmHideNativeMaskButton(ref.parentElement);
     if (getComputedStyle(cont).position === "static") cont.style.position = "relative";
     let ov = cont.querySelector("img.opm-tint");
     if (!ov) {
@@ -1946,14 +1951,79 @@ function fitOverlay(ov) {
 // when the bar is missing. Click uploads the clipboard image to the input
 // folder and selects it on the node at once.
 
-// Fallback copy of the native preview action button classes (h-8 = 32px).
-// Used only when the native download button has not rendered yet.
-const OPM_NATIVE_BTN_CLS = "flex h-8 min-h-8 cursor-pointer items-center justify-center rounded-lg border-0 bg-base-foreground p-2 text-base-background shadow-interface transition-colors duration-200 hover:bg-base-foreground/90";
+// Fallback copy of the native preview action button classes (frontend 1.58,
+// cold theme: cream `bg-foreground` on the dark hover bar). Used only until
+// the native download button has rendered; the live class list is copied then.
+const OPM_NATIVE_BTN_CLS = "relative inline-flex cursor-pointer touch-manipulation appearance-none " +
+  "items-center justify-center gap-2 border-none font-inter text-sm font-medium whitespace-nowrap " +
+  "transition-colors bg-foreground text-background hover:bg-foreground/80 size-8 rounded-lg shadow-md";
 // Gap between the paste and download icons (native flex gap + extra margin).
 const OPM_PASTE_GAP = 8;
 
 function opmIconPaste() {
-  return '<i class="icon-[lucide--clipboard-paste] size-4" aria-hidden="true"></i>';
+  // Clipboard-paste pictogram (the same one the frontend's "Paste Image"
+  // action uses), drawn in the native button color. An inline SVG is used on
+  // purpose: the old copy icon made paste and copy indistinguishable.
+  return '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" ' +
+    'viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M11 14h10"/><path d="M16 4h2a2 2 0 0 1 2 2v1.344"/>' +
+    '<path d="m17 18 4-4-4-4"/>' +
+    '<path d="M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 1.793-1.113"/>' +
+    '<rect x="8" y="2" width="8" height="4" rx="1"/></svg>';
+}
+
+// Clone the native download button (classes, inline style and attributes) so
+// a helper button inherits EXACTLY the same look in every theme/build, like
+// the FastMask node does. Falls back to the static class copy when the native
+// button has not rendered yet.
+function opmCloneNativeButton(native, fallbackCls) {
+  let nb = null;
+  if (native && native.cloneNode) {
+    try {
+      nb = native.cloneNode(false);
+      nb.removeAttribute("id");
+      nb.removeAttribute("disabled");
+      nb.removeAttribute("title");
+      nb.removeAttribute("aria-label");
+      nb.removeAttribute("aria-describedby");
+    } catch (e) {
+      nb = null;
+    }
+  }
+  if (!nb) {
+    nb = document.createElement("button");
+    nb.type = "button";
+    nb.className = fallbackCls;
+  }
+  return nb;
+}
+
+const OPM_MAIN_IMAGE_SELECTOR = "img:not(.opm-tint)";
+
+const ICON_COPY =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" ' +
+  'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+  'stroke-linejoin="round" aria-hidden="true">' +
+  '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>' +
+  '<path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
+const ICON_OK =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" ' +
+  'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+  'stroke-linejoin="round" aria-hidden="true">' +
+  '<path d="M20 6 9 17l-5-5"/></svg>';
+const ICON_FAIL =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" ' +
+  'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+  'stroke-linejoin="round" aria-hidden="true">' +
+  '<path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
+
+async function opmFetchImageBlob(url) {
+  const absolute = new URL(url, window.location.href);
+  absolute.searchParams.delete("preview");
+  const response = await fetch(absolute.toString());
+  if (!response.ok) throw new Error(`Image download failed: ${response.status}`);
+  return await response.blob();
 }
 
 function opmApplyNewImageToNode(node, value) {
@@ -2005,6 +2075,75 @@ function opmApplyNewImageToNode(node, value) {
   }
 }
 
+async function opmReencodeAsPngBlob(blob, width, height) {
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, width || 0);
+  canvas.height = Math.max(1, height || 0);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Could not get canvas context");
+  let image;
+  if (typeof window.createImageBitmap === "undefined") {
+    image = await new Promise((resolve, reject) => {
+      const img = new Image();
+      const objectUrl = URL.createObjectURL(blob);
+      img.onload = () => { URL.revokeObjectURL(objectUrl); resolve(img); };
+      img.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error("Image load failed")); };
+      img.src = objectUrl;
+    });
+  } else {
+    image = await createImageBitmap(blob);
+  }
+  try { ctx.drawImage(image, 0, 0); } finally { if (image && typeof image.close === "function") image.close(); }
+  return await new Promise((resolve, reject) => {
+    canvas.toBlob((result) => { if (result) resolve(result); else reject(new Error("PNG conversion failed")); }, "image/png");
+  });
+}
+
+async function opmWriteBlobToClipboard(blob, naturalWidth, naturalHeight) {
+  try {
+    await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+  } catch (error) {
+    if (blob.type !== "image/png") {
+      const pngBlob = await opmReencodeAsPngBlob(blob, naturalWidth, naturalHeight);
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": pngBlob })]);
+      return;
+    }
+    throw error;
+  }
+}
+
+function opmFlash(button, ok) {
+  const original = button.innerHTML;
+  const originalTitle = button.title;
+  button.innerHTML = ok ? ICON_OK : ICON_FAIL;
+  button.title = ok ? "Copied to clipboard" : "Copy failed";
+  window.setTimeout(() => {
+    if (button.isConnected) {
+      button.innerHTML = original;
+      button.title = originalTitle;
+    }
+  }, 1200);
+}
+
+async function opmHandleCopyClick(button) {
+  const box = button.closest(".opm-preview-box") || button.parentElement;
+  if (!box || !box.isConnected) return;
+  const img = box.querySelector(OPM_MAIN_IMAGE_SELECTOR);
+  if (!img || !img.src) { opmFlash(button, false); return; }
+  if (typeof window.ClipboardItem === "undefined") { opmFlash(button, false); return; }
+  button.disabled = true;
+  try {
+    const blob = await opmFetchImageBlob(img.currentSrc || img.src);
+    await opmWriteBlobToClipboard(blob, img.naturalWidth, img.naturalHeight);
+    opmFlash(button, true);
+  } catch (error) {
+    console.error("[OutpaintCopy] copy to clipboard failed:", error);
+    opmFlash(button, false);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function opmResetForNewImage(node) {
   // New source image: the old frame paddings describe the OLD picture,
   // so they must not survive. Keep display prefs (mp/unit/dpi) and write
@@ -2033,6 +2172,91 @@ function opmResetForNewImage(node) {
     node._opm_preview = null;
     node._opm_previewKey = null;
   } catch (e) { /* never break image switching over state reset */ }
+}
+
+function opmEnsurePreviewCopyButton(node) {
+  try {
+    const cont = document.querySelector(`[data-node-id="${node.id}"]`);
+    if (!cont) return;
+    const preview = findPreviewImg(cont);
+    if (!preview) return;
+    const box = preview.parentElement;
+    if (!box) return;
+    opmHideNativeMaskButton(box);
+    const actions = opmFindNativeActions(box);
+    const native = opmFindNativeDownloadBtn(box);
+    const btnCls = (native && typeof native.className === "string" && native.className) || OPM_NATIVE_BTN_CLS;
+    // Another extension (e.g. comfy_preview_copy_button) may already provide
+    // a copy action in this preview: never stack a second copy button. Its
+    // class list predates the 1.58 theme and renders as a plain grey browser
+    // button, so restyle it with the native download classes (keeping its own
+    // marker class, or that extension would add another copy button).
+    if (actions) {
+      const foreign = [...actions.querySelectorAll(
+        'button[aria-label="Copy image"], button[title="Copy image"]'
+      )].find((el) => !el.classList.contains("opm-preview-copy"));
+      if (foreign) {
+        if (foreign._opmNativeCls !== btnCls) {
+          foreign._opmNativeCls = btnCls;
+          const marker = foreign.classList.contains("pp-copy-btn") ? " pp-copy-btn" : "";
+          foreign.className = `${btnCls}${marker}`;
+          try {
+            if (native && native.hasAttribute && native.hasAttribute("data-variant")) {
+              foreign.setAttribute("data-variant", native.getAttribute("data-variant"));
+            }
+          } catch (e) { /* ignore */ }
+        }
+        const mine = box._opmCopyBtn;
+        if (mine && mine.isConnected) mine.remove();
+        box._opmCopyBtn = null;
+        return;
+      }
+    }
+    let b = box._opmCopyBtn;
+    if (b && b.isConnected) {
+      if (b._opmNativeCls !== btnCls) {
+        b._opmNativeCls = btnCls;
+        b.className = `opm-preview-copy opm-extra-gap ${btnCls}`;
+      }
+      if (actions) {
+        b.style.left = ""; b.style.top = ""; b.style.width = ""; b.style.height = ""; b.style.right = ""; b.style.position = "";
+        const paste = box._opmPasteBtn;
+        const ref = paste || native;
+        if (ref && ref.parentElement === actions) {
+          actions.insertBefore(b, ref.nextSibling);
+        } else if (actions.firstChild !== b) {
+          actions.insertBefore(b, actions.firstChild);
+        }
+      } else {
+        opmPlaceFallbackBtn(box, b, native);
+      }
+      return;
+    }
+    const nb = opmCloneNativeButton(native, OPM_NATIVE_BTN_CLS);
+    nb._opmNativeCls = btnCls;
+    nb.innerHTML = ICON_COPY;
+    nb.title = "Copy image";
+    nb.setAttribute("aria-label", "Copy image");
+    nb.addEventListener("pointerdown", (e) => e.stopPropagation());
+    nb.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); opmHandleCopyClick(nb); });
+    if (actions) {
+      nb.className = `opm-preview-copy opm-extra-gap ${btnCls}`;
+      const paste = box._opmPasteBtn;
+      const ref = paste || native;
+      if (ref && ref.parentElement === actions) {
+        actions.insertBefore(nb, ref.nextSibling);
+      } else {
+        actions.insertBefore(nb, actions.firstChild);
+      }
+    } else {
+      if (getComputedStyle(box).position === "static") box.style.position = "relative";
+      box.classList.add("opm-preview-box");
+      nb.className = `opm-preview-copy opm-fallback ${btnCls}`;
+      opmPlaceFallbackBtn(box, nb, native);
+      box.appendChild(nb);
+    }
+    box._opmCopyBtn = nb;
+  } catch (e) { /* never break the app over cosmetics */ }
 }
 
 function watchImageWidget(node) {
@@ -2253,8 +2477,9 @@ function opmFindNativeDownloadBtn(box) {
   try {
     const els = box.querySelectorAll("button, a");
     for (const b of els) {
-      if (!b || b === box._opmPasteBtn) continue;
+      if (!b || b === box._opmPasteBtn || b === box._opmCopyBtn) continue;
       if (b.classList && b.classList.contains("opm-preview-paste")) continue;
+      if (b.classList && b.classList.contains("opm-preview-copy")) continue;
       const html = (b.innerHTML || "").toLowerCase();
       if (html.indexOf("lucide--download") !== -1) return b;
       const lab = (((b.getAttribute && b.getAttribute("aria-label")) || "") + " " +
@@ -2265,6 +2490,22 @@ function opmFindNativeDownloadBtn(box) {
     /* ignore */
   }
   return null;
+}
+
+function opmHideNativeMaskButton(box) {
+  // The core image_upload preview adds an "Edit or mask image" action (the
+  // core mask editor) to the hover bar. On this node it opens the WRONG
+  // editor, so hide only that action, scoped to our own preview box.
+  try {
+    if (!box) return;
+    box.querySelectorAll(
+      'button[aria-label="Edit or mask image"], button[title="Edit or mask image"]'
+    ).forEach((b) => {
+      if (b.style.display !== "none") b.style.display = "none";
+    });
+  } catch (e) {
+    /* ignore */
+  }
 }
 
 function opmRaisePreviewActions(box) {
@@ -2324,6 +2565,7 @@ function ensurePreviewPasteButton(node) {
     if (!preview) return;
     const box = preview.parentElement;
     if (!box) return;
+    opmHideNativeMaskButton(box);
     const actions = opmFindNativeActions(box);
     const native = opmFindNativeDownloadBtn(box);
     if (actions) opmRaisePreviewActions(box);
@@ -2354,8 +2596,7 @@ function ensurePreviewPasteButton(node) {
       }
       return;
     }
-    const nb = document.createElement("button");
-    nb.type = "button";
+    const nb = opmCloneNativeButton(native, OPM_NATIVE_BTN_CLS);
     nb._opmNativeCls = btnCls;
     nb.innerHTML = opmIconPaste();
     nb.title = "Paste image from clipboard";
@@ -2377,6 +2618,7 @@ function ensurePreviewPasteButton(node) {
       box.appendChild(nb);
     }
     box._opmPasteBtn = nb;
+    opmEnsurePreviewCopyButton(node);
   } catch (e) {
     /* never break the app over cosmetics */
   }
@@ -2401,6 +2643,7 @@ setInterval(() => {
         wireNodePreviewClick(n);
         keepOpenButtonBelowPreview(n);
         ensurePreviewPasteButton(n);
+        opmEnsurePreviewCopyButton(n);
       }
       // Safety net for image swaps that bypass the widget callback:
       // reset the mask frame to the new image and refresh the preview.
@@ -2461,6 +2704,9 @@ function makeOpenButtonEl(node) {
   const b = document.createElement("button");
   b.className = "opm-open-btn";
   b.textContent = "Outpaint Editor";
+  // Keep the running frontend version discoverable without showing it on the
+  // button itself.
+  b.title = `Open Outpaint editor (v${VERSION})`;
   b.addEventListener("click", (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -2527,6 +2773,7 @@ function wireNodePreviewClick(node) {
     if (!cont) return;
     const ref = findPreviewImg(cont);
     const box = ref ? ref.parentElement : null;
+    opmHideNativeMaskButton(box);
     if (box && box !== cont && !box._opmBoxClickWired) {
       box.style.cursor = "pointer";
       box.title = "Click to open Outpaint editor";
@@ -2576,7 +2823,28 @@ function keepOpenButtonBelowPreview(node) {
         const pv = findPreviewImg(nEl);
         if (!pv) return false; // preview not rendered yet
         const pvBox = pv.closest(".image-preview") || pv.closest(".comfy-widget") || pv.parentElement;
-        if (!wrap || !pvBox || wrap === pvBox || pvBox.contains(wrap)) return true;
+        // The empty widget slot must stay collapsed across Vue re-renders:
+        // the row is recreated with the button back inside, then moved out
+        // again, leaving a blank stripe above the preview. Collapse it on
+        // every pass, whether the button has already been moved or not.
+        const collapseSlot = () => {
+          try {
+            const row = nEl.querySelector('[data-widget-name="opm_open"]');
+            if (!row || row.contains(wrap)) return;
+            row.style.setProperty("display", "none", "important");
+            const outer = row.parentElement;
+            if (outer && outer.parentElement && outer.parentElement.classList.contains("lg-node-widgets")) {
+              outer.style.setProperty("display", "none", "important");
+            }
+          } catch (e) { /* ignore */ }
+        };
+        if (!wrap || !pvBox || wrap === pvBox || pvBox.contains(wrap)) {
+          collapseSlot();
+          return true;
+        }
+        // Remember the widget slot the button lived in BEFORE moving it, so
+        // the emptied row can be collapsed (otherwise it leaves a blank
+        // stripe above the preview in the Nodes 2 widget grid).
         if (wrap.compareDocumentPosition(pvBox) & Node.DOCUMENT_POSITION_FOLLOWING) {
           pvBox.after(wrap);
         }
@@ -2584,6 +2852,28 @@ function keepOpenButtonBelowPreview(node) {
           wrap.style.setProperty("margin-top", "8px", "important");
           wrap.style.setProperty("margin-bottom", "4px", "important");
           wrap.style.setProperty("width", "100%", "important");
+        } catch (e) { /* ignore */ }
+        collapseSlot();
+        // The frontend does not grow the node for DOM content: without this
+        // the preview/button spill outside the node body. Grow once per
+        // preview size (never shrink), so a manual node resize is kept.
+        try {
+          const header = nEl.querySelector(".lg-node-header");
+          const grid = nEl.querySelector(".lg-node-widgets");
+          const need =
+            (header ? header.offsetHeight : 28) +
+            (grid ? grid.offsetHeight : 0) +
+            (pvBox.offsetHeight || 0) +
+            (wrap.offsetHeight || 34) + 44;
+          const key = `${need}:${pvBox.offsetHeight || 0}`;
+          if (node._opmFitKey !== key) {
+            node._opmFitKey = key;
+            // node.size is a Float64Array in the Nodes 2 frontend.
+            if (node.size && node.size.length >= 2 && node.size[1] < need) {
+              if (typeof node.setSize === "function") node.setSize([node.size[0], need]);
+              else node.size[1] = need;
+            }
+          }
         } catch (e) { /* ignore */ }
         return true;
       } catch (e) { return false; }

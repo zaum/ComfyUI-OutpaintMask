@@ -1,8 +1,21 @@
 # ComfyUI Outpaint Mask — Changelog
 
-* **Total commits:** 11
-* **Date range:** 2026-09-12 – 2026-09-24
-* **Environment / Context:** Published to the Comfy Registry as `comfyui-outpaintmask` 1.15.0; Manager listing PR #3293 still awaiting approval; 1.15.2 is a post-release stability fix
+* **Total commits:** 12
+* **Date range:** 2026-09-12 – 2026-11-11
+* **Environment / Context:** Published to the Comfy Registry as `comfyui-outpaintmask` 1.15.0; Manager listing PR #3293 still awaiting approval; 1.15.2 is a post-release stability fix; 1.15.4 restores the frontend on ComfyUI 0.45.2 / frontend 1.58.5
+
+---
+
+### <sup><sub style="font-size: 0.7em;">2026-11-11</sub></sup> · 🐛 Fixes · Restored the Frontend on ComfyUI 0.45
+* Repaired a mangled frontend module (interleaved function bodies) that stopped the whole extension from loading, so the editor did not open from the preview and the state widget stayed visible.
+* Added a full-width Outpaint Editor button below the image preview and kept it below the preview across frontend re-renders.
+* Retargeted preview click-to-open at the core main-image panel and grew the node once per preview size so the image and the button stay inside the node.
+* Hid the core "Edit or mask image" action on this node and reused the copy button of another extension instead of stacking a duplicate.
+* Matched the preview hover buttons to the native theme by cloning the download button, gave the paste action the clipboard-paste icon, and restyled the foreign copy button that rendered grey in the 1.58 theme.
+* Removed the visible version text from the editor button (kept in its tooltip).
+* Updated the package version to 1.15.4.
+
+`Direct Commit`
 
 ---
 

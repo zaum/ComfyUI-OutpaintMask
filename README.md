@@ -4,8 +4,9 @@ Custom ComfyUI node for creating **outpaint masks** interactively.
 
 # ![screenshot](img/screenshot.jpg)
 
-Select or upload an image on the node (or hover the preview and use the
-clipboard-paste icon).
+Select or upload an image on the node, then click the image (or the wide
+**Outpaint Editor** button below it) to open the editor. You can also hover
+the preview and use the clipboard-paste icon.
 
 - 8 draggable handles: corners resize proportionally by default (hold
   Shift for free resize)
